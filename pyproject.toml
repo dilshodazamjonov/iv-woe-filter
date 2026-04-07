@@ -1,0 +1,17 @@
+[project]
+name = "ivpackage"
+version = "0.1.0"
+description = "IV-WOE feature selection with frozen binning"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "joblib"
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
