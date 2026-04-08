@@ -1,242 +1,189 @@
-# iv_filter.py
 import os
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any, Union
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.utils.validation import check_is_fitted
 
+from .binning import fit_numeric_bins, fit_categorical_bins, apply_bins, merge_non_significant_bins
+from .woe import compute_aggregate_stats, calculate_woe_iv, check_monotonicity
 
-# Setup module logger
-logger = logging.getLogger("iv_filter")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger("iv_woe_package")
+logging.basicConfig(level=logging.INFO)
 
+class IVWOEFilter(BaseEstimator, TransformerMixin):
+    """
+    Advanced IV/WOE Filter and Transformer for Credit Scoring.
+    
+    This class performs optimal binning, calculates Information Value (IV),
+    filters features based on predictive power, and transforms raw data 
+    into Weight of Evidence (WOE) values.
+    """
 
-class IVFilter:
     def __init__(
         self,
-        target_col: Optional[str] = None,
         n_bins: int = 10,
-        min_iv: float = 0.01,
-        max_iv_for_leakage: float = 0.5,
-        min_bin_pct: Optional[float] = None,
-        verbose: bool = True,
-        save_bin_level_stats: bool = True,
+        min_iv: float = 0.02,
+        max_iv_for_leakage: float = 0.8,
+        min_bin_pct: Optional[float] = 0.05,
+        special_codes: Optional[Dict[str, List[Any]]] = None,
+        encode: bool = True,
+        n_jobs: int = -1,
         output_dir: Optional[str] = None,
-        n_jobs: int = -1 # Parallel jobs for processing features
+        verbose: bool = True
     ):
-        """
-        Params:
-            target_col: optional name of the target
-            n_bins: quantile bins for numeric variables
-            min_iv: threshold to keep a feature
-            max_iv_for_leakage: flag features with IV >= this value
-            min_bin_pct: optional minimum bin fraction check
-            verbose: print progress
-            save_bin_level_stats: save per-bin stats
-            output_dir: directory where outputs will be saved
-        """
-        self.target_col = target_col
         self.n_bins = n_bins
         self.min_iv = min_iv
         self.max_iv_for_leakage = max_iv_for_leakage
         self.min_bin_pct = min_bin_pct
-        self.verbose = verbose
-        self.save_bin_level_stats = save_bin_level_stats
-        self.output_dir = output_dir
+        self.special_codes = special_codes or {}
+        self.encode = encode
         self.n_jobs = n_jobs
-
-        self.iv_table_: Optional[pd.DataFrame] = None
-        self.selected_features_: Optional[list] = None
-        self._per_feature_stats: Dict[str, pd.DataFrame] = {}
-
-    # -------------------------
-    # Helpers
-    # -------------------------
+        self.output_dir = output_dir
+        self.verbose = verbose
 
     @staticmethod
-    def _process_column_worker(col_name, series, y_arr, n_bins, min_bin_pct):
-        """
-        This is the function that runs on each CPU core.
-        It is STATIC so it doesn't have to carry the whole 'self' object.
-        """
-        # Determine if numeric or categorical
-        if pd.api.types.is_numeric_dtype(series):
-            # Numeric Logic
-            try:
-                bins = pd.qcut(series, q=n_bins, duplicates="drop")
-            except Exception:
-                bins = pd.cut(series, bins=n_bins)
-            cat = pd.Categorical(bins)
-            codes = cat.codes
+    def _process_column(
+        col_name: str, 
+        series: pd.Series, 
+        y: np.ndarray, 
+        n_bins: int, 
+        min_bin_pct: Optional[float],
+        specials: List[Any]
+    ) -> Dict[str, Any]:
+        """Worker function for parallel processing of a single feature."""
+        # 1. Determine Type and Fit Binning
+        is_numeric = pd.api.types.is_numeric_dtype(series)
+        if is_numeric:
+            bin_config = fit_numeric_bins(series, n_bins, specials)
         else:
-            # Categorical Logic
-            s = series.fillna("missing").astype(object)
-            cat = pd.Categorical(s)
-            codes = cat.codes
+            bin_config = fit_categorical_bins(series, specials)
 
-        # Handle NaNs in codes
-        if (codes == -1).any():
-            nan_mask = codes == -1
-            codes = codes.copy()
-            codes[nan_mask] = codes.max() + 1
+        # 2. Apply Binning to generate codes
+        codes = apply_bins(series, bin_config)
 
-        stats = IVFilter._compute_group_stats_from_codes(codes, y_arr)
+        # 3. Optional: Merge small bins
+        if min_bin_pct:
+            codes = merge_non_significant_bins(codes, y, min_bin_pct)
 
-        if min_bin_pct is not None:
-            total = stats["count"].sum()
-            stats["_small_bin_flag"] = ((stats["count"] / total) < min_bin_pct).astype(int)
+        # 4. Compute Statistics
+        stats = compute_aggregate_stats(codes, y)
+        woe_series, iv_bin_series, iv_value = calculate_woe_iv(stats)
+        
+        # 5. Enrichment
+        stats = stats.assign(woe=woe_series, iv_bin=iv_bin_series)
+        mono_info = check_monotonicity(woe_series)
 
-        iv_val, woe, iv_bin = IVFilter._iv_from_stats(stats)
-        stats = stats.assign(woe=woe, iv_bin=iv_bin)
+        return {
+            "column": col_name,
+            "iv": iv_value,
+            "bin_config": bin_config,
+            "stats": stats,
+            "woe_map": woe_series.to_dict(),
+            "monotonic": mono_info
+        }
 
-        if not pd.api.types.is_numeric_dtype(series):
-            stats["_categories"] = list(cat.categories)
+    def fit(self, X: pd.DataFrame, y: Union[pd.Series, np.ndarray]) -> "IVWOEFilter":
+        """
+        Fits binning and calculates WOE/IV for all columns in X.
+        
+        Args:
+            X: Input features.
+            y: Binary target (0/1).
+        """
+        if self.output_dir:
+            os.makedirs(self.output_dir, exist_ok=True)
 
-        return col_name, float(iv_val), stats
-    
-    @staticmethod
-    def _safe_div(a, b):
-        return np.divide(a, b, out=np.zeros_like(a, dtype=float), where=(b != 0))
-
-    @staticmethod
-    def _compute_group_stats_from_codes(codes, y_arr):
-        codes = np.asarray(codes)
-        y_arr = np.asarray(y_arr).astype(int)
-
-        uniq, inv = np.unique(codes, return_inverse=True)
-        counts = np.bincount(inv)
-        bads = np.bincount(inv, weights=y_arr)
-        goods = counts - bads
-
-        total_bad = bads.sum()
-        total_good = goods.sum()
-
-        bad_pct = IVFilter._safe_div(bads, total_bad)
-        good_pct = IVFilter._safe_div(goods, total_good)
-
-        df = pd.DataFrame(
-            {
-                "group": uniq,
-                "count": counts,
-                "bad": bads,
-                "good": goods,
-                "bad_pct": bad_pct,
-                "good_pct": good_pct,
-            }
-        ).set_index("group")
-
-        return df
-
-    @staticmethod
-    def _woe_from_stats(stats_df):
-        eps = 1e-12
-        return np.log((stats_df["good_pct"] + eps) / (stats_df["bad_pct"] + eps))
-
-    @staticmethod
-    def _iv_from_stats(stats_df):
-        woe = IVFilter._woe_from_stats(stats_df)
-        iv_bin = (stats_df["good_pct"] - stats_df["bad_pct"]) * woe
-        return iv_bin.sum(), woe, iv_bin
-
-    # -------------------------
-    # Main API
-    # -------------------------
-    def fit(self, X: pd.DataFrame, y: pd.Series):
-
-        if self.output_dir is None:
-            raise ValueError("output_dir must be provided externally.")
-
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        ivs = {}
-        stats_store = {}
         y_arr = np.asarray(y)
+        columns = X.columns.tolist()
 
         results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_column_worker)(
-                col, X[col], y_arr, self.n_bins, self.min_bin_pct
-            ) for col in X.columns
+            delayed(self._process_column)(
+                col, X[col], y_arr, self.n_bins, self.min_bin_pct, self.special_codes.get(col, [])
+            ) for col in columns
         )
 
-        for col_name, iv_val, stats in results:
-            ivs[col_name] = iv_val
-            stats_store[col_name] = stats
-            
-        iv_df = pd.DataFrame.from_dict(ivs, orient="index", columns=["IV"]).sort_values("IV", ascending=False)
-        self.iv_table_ = iv_df
-        self.selected_features_ = iv_df[iv_df["IV"] >= self.min_iv].index.tolist()
-        self._per_feature_stats = stats_store
+        # Initialize fitted attributes
+        self.binning_: Dict[str, Any] = {}
+        self.woe_maps_: Dict[str, Any] = {}
+        self.iv_table_data_: Dict[str, float] = {}
+        self._per_feature_stats: Dict[str, pd.DataFrame] = {}
+        self.monotonicity_report_: Dict[str, Any] = {}
 
-        # -------------------------
-        # Save outputs
-        # -------------------------
-        iv_df.to_csv(os.path.join(self.output_dir, "iv_table.csv"))
+        for res in results:
+            col = res["column"]
+            self.binning_[col] = res["bin_config"]
+            self.woe_maps_[col] = res["woe_map"]
+            self.iv_table_data_[col] = res["iv"]
+            self._per_feature_stats[col] = res["stats"]
+            self.monotonicity_report_[col] = res["monotonic"]
 
-        pd.Series(self.selected_features_, name="selected_feature") \
-            .to_frame().to_csv(os.path.join(self.output_dir, "iv_selected_features.csv"), index=False)
+        # Finalize Selection
+        self.iv_table_ = pd.DataFrame.from_dict(
+            self.iv_table_data_, orient="index", columns=["IV"]
+        ).sort_values("IV", ascending=False)
+        
+        self.selected_features_ = self.iv_table_[
+            self.iv_table_["IV"] >= self.min_iv
+        ].index.tolist()
 
-        iv_df[iv_df["IV"] < self.min_iv] \
-            .to_csv(os.path.join(self.output_dir, "iv_dropped_features.csv"))
-
-        # Feature summary
-        summaries = []
-        for col, stats in stats_store.items():
-            summaries.append({
-                "feature": col,
-                "IV": ivs[col],
-                "num_bins": len(stats),
-                "max_woe": stats["woe"].max(),
-                "min_woe": stats["woe"].min(),
-                "mean_woe": stats["woe"].mean(),
-                "max_bad_pct": stats["bad_pct"].max(),
-                "mean_bad_pct": stats["bad_pct"].mean(),
-                "max_iv_bin": stats["iv_bin"].max(),
-                "perfect_bin_sep": int((stats["bad_pct"] == 0).any() or (stats["good_pct"] == 0).any()),
-                "small_bin_exists": int("_small_bin_flag" in stats and stats["_small_bin_flag"].any())
-            })
-
-        pd.DataFrame(summaries) \
-            .sort_values("IV", ascending=False) \
-            .to_csv(os.path.join(self.output_dir, "iv_feature_summaries.csv"), index=False)
-
-        # Bin-level stats
-        if self.save_bin_level_stats:
-            long_rows = []
-            for col, stats in stats_store.items():
-                df = stats.reset_index().rename(columns={"group": "bin_id"})
-                df["feature"] = col
-                long_rows.append(df[["feature", "bin_id", "count", "bad", "good", "bad_pct", "good_pct", "woe", "iv_bin"]])
-
-            pd.concat(long_rows, ignore_index=True) \
-                .to_csv(os.path.join(self.output_dir, "iv_bin_level_stats.csv"), index=False)
-
-        # Leakage flags
-        leakage = {}
-        for col, iv_val in ivs.items():
-            flags = []
-            if iv_val >= self.max_iv_for_leakage:
-                flags.append("high_iv")
-            stats = stats_store[col]
-            if (stats["bad_pct"] == 0).any() or (stats["good_pct"] == 0).any():
-                flags.append("perfect_sep")
-            leakage[col] = ";".join(flags)
-
-        pd.Series(leakage, name="leakage_flags") \
-            .to_frame().to_csv(os.path.join(self.output_dir, "iv_leakage_flags.csv"))
+        if self.output_dir:
+            self._save_artifacts()
 
         if self.verbose:
-            logger.info(f"Saved IV outputs to {self.output_dir}")
+            logger.info(f"Fit complete. Selected {len(self.selected_features_)} features.")
 
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        if self.selected_features_ is None:
-            raise RuntimeError("IVFilter not fitted.")
+        """
+        Transforms features using fitted binning and WOE maps.
+        
+        Args:
+            X: Input features.
+        Returns:
+            DataFrame with selected features (optionally WOE encoded).
+        """
+        check_is_fitted(self, ["selected_features_", "binning_", "woe_maps_"])
+        
+        X_out = X[self.selected_features_].copy()
 
-        sel = [c for c in self.iv_table_.index if c in self.selected_features_]
-        return X.reindex(columns=sel, fill_value=0)
+        if not self.encode:
+            return X_out
 
-    def fit_transform(self, X, y):
-        self.fit(X, y)
-        return self.transform(X)
+        for col in self.selected_features_:
+            codes = apply_bins(X_out[col], self.binning_[col])
+            # Map codes to WOE, defaulting to 0.0 for unknown/unseen bins
+            w_map = self.woe_maps_[col]
+            X_out[col] = np.vectorize(lambda c: w_map.get(c, 0.0))(codes)
+
+        return X_out
+
+    def _save_artifacts(self) -> None:
+        """Serializes fit statistics to the output directory."""
+        self.iv_table_.to_csv(os.path.join(self.output_dir, "iv_summary.csv"))
+        
+        # Bin Level Detailed Stats
+        bin_stats = pd.concat([
+            df.assign(feature=feat) for feat, df in self._per_feature_stats.items()
+        ]).reset_index()
+        bin_stats.to_csv(os.path.join(self.output_dir, "bin_stats.csv"), index=False)
+
+        # Monotonicity and Leakage Flags
+        audit_rows = []
+        for col in self.iv_table_.index:
+            audit_rows.append({
+                "feature": col,
+                "IV": self.iv_table_data_[col],
+                "is_monotonic": self.monotonicity_report_[col]["is_monotonic"],
+                "direction": self.monotonicity_report_[col]["direction"],
+                "leakage_flag": self.iv_table_data_[col] > self.max_iv_for_leakage
+            })
+        pd.DataFrame(audit_rows).to_csv(os.path.join(self.output_dir, "feature_audit.csv"), index=False)
+
+    def get_feature_names_out(self, input_features=None) -> List[str]:
+        """Compatibility with Sklearn Pipeline."""
+        check_is_fitted(self, "selected_features_")
+        return self.selected_features_
