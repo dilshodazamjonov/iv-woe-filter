@@ -173,7 +173,8 @@ def merge_non_significant_bins(
         mask = (new_bin_ids == bin_id)
         if (mask.sum() / total_count) < min_pct:
             # Find closest bin ID to merge into
-            dist = np.abs(unique_bins - bin_id)
+            # Use float to allow np.inf assignment
+            dist = np.abs(unique_bins.astype(float) - float(bin_id))
             dist[unique_bins == bin_id] = np.inf
             nearest_neighbor = unique_bins[np.argmin(dist)]
             new_bin_ids[mask] = nearest_neighbor
