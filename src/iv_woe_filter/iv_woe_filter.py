@@ -103,13 +103,15 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         else:
             bin_config = fit_categorical_bins(series, specials)
 
-        codes = apply_bins(series, bin_config)
+        # Generate Bin IDs (formerly codes)
+        bin_ids = apply_bins(series, bin_config)
 
+        # Optional: Merge bins based on population threshold
         if min_bin_pct:
-            codes = merge_non_significant_bins(codes, y, min_bin_pct)
+            bin_ids = merge_non_significant_bins(bin_ids, min_bin_pct)
 
         # 2. Stats Logic
-        stats = compute_aggregate_stats(codes, y)
+        stats = compute_aggregate_stats(bin_ids, y)
         woe_series, iv_bin_series, iv_value = calculate_woe_iv(stats)
 
         # 3. Enrichment Logic
@@ -223,10 +225,10 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             return X_out
 
         for col in cols_to_process:
-            codes = apply_bins(X_out[col], self.binning_[col])
+            bin_ids = apply_bins(X_out[col], self.binning_[col])
             # High performance dictionary mapping with index preservation
             w_map = self.woe_maps_[col]
-            X_out[col] = pd.Series(codes, index=X_out.index).map(w_map).fillna(0.0)
+            X_out[col] = pd.Series(bin_ids, index=X_out.index).map(w_map).fillna(0.0)
 
         return X_out
 
