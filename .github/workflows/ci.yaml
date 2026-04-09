@@ -6,13 +6,18 @@ on:
   pull_request:
     branches: [ main ]
 
+# Ensure uv knows it is allowed to use the system Python provided by the GitHub Runner
+env:
+  UV_SYSTEM_PYTHON: 1
+
 jobs:
   test:
     name: Run Tests & Lint
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        # Test against multiple Python versions to ensure compatibility
+        # Test against multiple Python versions to ensure industry compatibility
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
@@ -31,18 +36,20 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Install the package in editable mode with test dependencies
           uv pip install -e ".[test]"
-          uv pip install ruff pytest
+          # Explicitly install ruff for linting
+          uv pip install ruff
 
       - name: Lint with Ruff
         run: |
-          # Checks for code style and common errors
-          uv run ruff check .
+          # Check for code style, imports, and common errors
+          ruff check .
 
       - name: Run Tests
         run: |
-          # Run the pytest suite we built
-          uv run pytest src/tests/
+          # Run the pytest suite from the root
+          pytest src/tests/
 
   build:
     name: Build Distribution
@@ -50,7 +57,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+
       - name: Build package
-        run: uv build
+        run: |
+          # Verifies that the package can be built into a .whl and .tar.gz
+          uv build
