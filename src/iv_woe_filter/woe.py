@@ -1,10 +1,5 @@
-"""
-Pure math module for Weight of Evidence (WOE) and Information Value (IV) calculations.
+"""Pure math module for Weight of Evidence (WOE) and Information Value (IV) calculations."""
 
-Contains low-level functions for safe division, group statistic aggregation, 
-WOE/IV computation, and trend monotonicity checking. These functions do not 
-know about binning rules or class orchestration.
-"""
 from __future__ import annotations
 
 import logging
@@ -43,22 +38,22 @@ def safe_div(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
     )
 
 
-def compute_aggregate_stats(codes: np.ndarray, y: np.ndarray) -> pd.DataFrame:
+def compute_aggregate_stats(bin_ids: np.ndarray, y: np.ndarray) -> pd.DataFrame:
     """Calculate bin-level statistics including bad/good counts and percentages.
 
     Parameters
     ----------
-    codes : np.ndarray
-        Array of bin assignments for each observation.
+    bin_ids : np.ndarray
+        Array of bin IDs (codes) assigned to each observation.
     y : np.ndarray
         Binary target array (1 for bad, 0 for good).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame indexed by bin, containing counts, bads, goods, and percentages.
+        DataFrame indexed by 'bin', containing counts, bads, goods, and percentages.
     """
-    unique_codes, inverse = np.unique(codes, return_inverse=True)
+    unique_bins, inverse = np.unique(bin_ids, return_inverse=True)
     counts = np.bincount(inverse)
     bads = np.bincount(inverse, weights=y)
     goods = counts - bads
@@ -71,7 +66,7 @@ def compute_aggregate_stats(codes: np.ndarray, y: np.ndarray) -> pd.DataFrame:
 
     return pd.DataFrame(
         {
-            "bin": unique_codes,
+            "bin": unique_bins,
             "count": counts,
             "bad": bads,
             "good": goods,
@@ -82,7 +77,7 @@ def compute_aggregate_stats(codes: np.ndarray, y: np.ndarray) -> pd.DataFrame:
 
 
 def calculate_woe_iv(
-    stats: pd.DataFrame, 
+    stats: pd.DataFrame,
     eps: float = 1e-12
 ) -> tuple[pd.Series, pd.Series, float]:
     """Compute WOE and IV for each bin and total feature IV.
@@ -99,8 +94,12 @@ def calculate_woe_iv(
     tuple[pd.Series, pd.Series, float]
         A tuple containing (WOE Series, IV per bin Series, total feature IV).
     """
+    # Weight of Evidence: ln(Distribution Good / Distribution Bad)
     woe = np.log((stats["good_pct"] + eps) / (stats["bad_pct"] + eps))
+
+    # Information Value per bin: (Dist Good - Dist Bad) * WOE
     iv_bin = (stats["good_pct"] - stats["bad_pct"]) * woe
+
     return woe, iv_bin, float(iv_bin.sum())
 
 
@@ -110,7 +109,7 @@ def check_monotonicity(woe: pd.Series) -> dict[str, Any]:
     Parameters
     ----------
     woe : pd.Series
-        Ordered WOE values for a feature.
+        Ordered WOE values for a feature (sorted by bin ID).
 
     Returns
     -------
@@ -120,6 +119,7 @@ def check_monotonicity(woe: pd.Series) -> dict[str, Any]:
     if len(woe) < 2:
         return {"is_monotonic": True, "direction": "none"}
 
+    # Calculate differences between adjacent WOE values to check trend
     diff = np.diff(woe.values)
     is_inc = np.all(diff >= 0)
     is_dec = np.all(diff <= 0)

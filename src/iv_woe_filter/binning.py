@@ -34,7 +34,7 @@ def fit_numeric_bins(
     Returns
     -------
     dict[str, Any]
-        Dictionary containing 'is_numeric', 'special_codes', and the bin 'bins' array.
+        Dictionary containing 'is_numeric', 'special_codes', and the 'bins' boundaries.
     """
     binning_data = {
         "is_numeric": True,
@@ -116,46 +116,44 @@ def apply_bins(
         Array of integer bin IDs. Special codes are mapped to negative IDs.
     """
     s = series.copy()
-    output_codes = np.full(s.shape, -1, dtype=int)
+    output_bins = np.full(s.shape, -1, dtype=int)
 
     # Handle Special Codes
     special_mask = s.isin(config["special_codes"])
     if special_mask.any():
         mapping = {val: -(i + 2) for i, val in enumerate(config["special_codes"])}
-        output_codes[special_mask] = s[special_mask].map(mapping)
+        output_bins[special_mask] = s[special_mask].map(mapping)
 
     remaining_mask = ~special_mask
     if not remaining_mask.any():
-        return output_codes
+        return output_bins
 
     # Handle Normal Data
     if config["is_numeric"]:
         numeric_s = pd.to_numeric(s[remaining_mask], errors="coerce")
         # pd.cut with labels=False returns float array with NaNs for out-of-bounds/NaNs
-        codes = pd.cut(numeric_s, bins=config["bins"], labels=False, include_lowest=True)
+        bins = pd.cut(numeric_s, bins=config["bins"], labels=False, include_lowest=True)
         
-        output_codes[remaining_mask] = np.nan_to_num(codes, nan=-1).astype(int)
+        # Safely convert to int after replacing NaNs with -1
+        output_bins[remaining_mask] = np.nan_to_num(bins, nan=-1).astype(int)
     else:
         cat_s = s[remaining_mask].fillna("missing").astype(str)
         lookup = {cat: i for i, cat in enumerate(config["categories"])}
-        output_codes[remaining_mask] = np.array([lookup.get(x, -1) for x in cat_s])
+        output_bins[remaining_mask] = np.array([lookup.get(x, -1) for x in cat_s])
 
-    return output_codes
+    return output_bins
 
 
 def merge_non_significant_bins(
-    codes: np.ndarray,
-    y: np.ndarray,
+    bin_ids: np.ndarray,
     min_pct: float,
 ) -> np.ndarray:
     """Merge bins that do not meet the minimum population threshold.
 
     Parameters
     ----------
-    codes : np.ndarray
+    bin_ids : np.ndarray
         Array of bin IDs.
-    y : np.ndarray
-        Binary target array for consistency (unused in simple merging but kept for API).
     min_pct : float
         Minimum percentage of total population required per bin.
 
@@ -164,20 +162,20 @@ def merge_non_significant_bins(
     np.ndarray
         Array of bin IDs with small bins merged into their nearest neighbor.
     """
-    unique_codes = np.unique(codes)
-    if len(unique_codes) <= 1:
-        return codes
+    unique_bins = np.unique(bin_ids)
+    if len(unique_bins) <= 1:
+        return bin_ids
 
-    total_count = len(codes)
-    new_codes = codes.copy()
+    total_count = len(bin_ids)
+    new_bin_ids = bin_ids.copy()
 
-    for code in unique_codes:
-        mask = (new_codes == code)
+    for bin_id in unique_bins:
+        mask = (new_bin_ids == bin_id)
         if (mask.sum() / total_count) < min_pct:
             # Find closest bin ID to merge into
-            dist = np.abs(unique_codes - code)
-            dist[unique_codes == code] = np.inf
-            nearest_neighbor = unique_codes[np.argmin(dist)]
-            new_codes[mask] = nearest_neighbor
+            dist = np.abs(unique_bins - bin_id)
+            dist[unique_bins == bin_id] = np.inf
+            nearest_neighbor = unique_bins[np.argmin(dist)]
+            new_bin_ids[mask] = nearest_neighbor
 
-    return new_codes
+    return new_bin_ids
