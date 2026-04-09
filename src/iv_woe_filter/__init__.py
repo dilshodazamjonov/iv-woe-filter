@@ -1,3 +1,3 @@
-from .iv_woe_filter import IVFilter
+from .iv_woe_filter import IVWOEFilter
 
-__all__ = ["IVFilter"]
+__all__ = ["IVWOEFilter"]

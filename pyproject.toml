@@ -6,7 +6,9 @@ dependencies = [
     "pandas",
     "numpy",
     "scikit-learn",
-    "joblib"
+    "joblib",
+    "tqdm>=4.67.3",
+    "pytest>=9.0.3",
 ]
 
 [build-system]
