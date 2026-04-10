@@ -8,7 +8,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
-from iv_woe_filter.iv_woe_filter import IVWOEFilter
+from iv_woe_filter import IVWOEFilter
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -120,3 +120,13 @@ def test_monotonicity_reporting(sample_data):
     report = transformer.monotonicity_report_["num_feat"]
     assert "is_monotonic" in report
     assert isinstance(report["is_monotonic"], bool)
+
+
+def test_fit_transform_consistency(sample_data):
+    X, y = sample_data
+    f = IVWOEFilter(min_iv=0.0)
+
+    X1 = f.fit_transform(X, y)
+    X2 = f.transform(X)
+
+    assert X1.equals(X2)

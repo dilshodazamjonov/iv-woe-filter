@@ -1,5 +1,5 @@
 [project]
-name = "ivpackage"
+name = "iv-woe-filter"
 version = "0.1.0"
 description = "IV-WOE feature selection with frozen binning"
 requires-python = ">=3.9"
@@ -27,7 +27,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["src/tests"]
+testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.ruff]

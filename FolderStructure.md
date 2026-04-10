@@ -1,5 +1,8 @@
 ```
 └── 📁IvPackage
+    └── 📁.github
+        └── 📁workflows
+            ├── ci.yaml
     └── 📁.pytest_cache
         └── 📁v
             └── 📁cache
@@ -24,6 +27,7 @@
             ├── test_iv_woe_filter.py
     ├── .gitignore
     ├── .python-version
+    ├── FolderStructure.md
     ├── LICENSE
     ├── main.py
     ├── pyproject.toml
