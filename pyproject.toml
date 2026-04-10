@@ -1,7 +1,8 @@
 [project]
 name = "iv-woe-filter"
 version = "0.1.0"
-description = "IV-WOE feature selection with frozen binning"
+description = "Financial-grade IV/WOE feature selection and encoding for credit risk modeling"
+readme = "README.md"
 requires-python = ">=3.9"
 authors = [
     {name = "Dilshod A'zamjonov", email = "dilshod1526@gmail.com"}
@@ -12,6 +13,7 @@ dependencies = [
     "scikit-learn",
     "joblib",
     "tqdm>=4.67.0",
+    "twine>=6.2.0",
 ]
 
 [project.optional-dependencies]

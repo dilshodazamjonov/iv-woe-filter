@@ -1,4 +1,12 @@
-"""Orchestration module for Information Value (IV) and Weight of Evidence (WOE) filtering."""
+"""Orchestration module for Information Value (IV) and Weight of Evidence (WOE) filtering.
+
+Advanced IV/WOE Filter and Transformer for Credit Scoring.
+
+This class performs optimal binning, calculates Information Value (IV),
+filters features based on predictive power, and transforms raw data 
+into Weight of Evidence (WOE) values.
+
+"""
 
 from __future__ import annotations
 
@@ -28,34 +36,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class IVWOEFilter(BaseEstimator, TransformerMixin):
-    """Advanced IV/WOE Filter and Transformer for Credit Scoring.
-
-    This class performs optimal binning, calculates Information Value (IV),
-    filters features based on predictive power, and transforms raw data 
-    into Weight of Evidence (WOE) values.
-
+    """
     Parameters
     ----------
     n_bins : int, default=10
-        Target number of bins for numeric quantile splitting.
+        Target bin count for numeric variables.
     min_iv : float, default=0.02
-        Minimum IV threshold required to keep a feature.
+        Minimum IV required to retain a feature.
     max_iv_for_leakage : float, default=0.8
-        IV threshold above which a feature is flagged for potential leakage.
+        IV threshold to flag potential data leakage.
     min_bin_pct : float or None, default=0.05
-        Minimum population percentage required per bin.
+        Minimum population fraction required per bin.
     special_codes : dict[str, list[Any]] or None
-        Dictionary mapping column names to lists of special values.
+        Mapping of columns to isolated special/system values.
     encode : bool, default=True
-        If True, transform returns WOE values.
+        If True, replace raw values with WOE during transform.
     drop_low_iv : bool, default=True
-        If True, transform drops columns that fell below min_iv.
+        If True, drop features falling below `min_iv`.
     n_jobs : int, default=-1
-        Number of parallel jobs for processing features.
+        Number of parallel CPU workers.
     output_dir : str or None
-        Directory to save audit artifacts.
+        Path to save regulatory audit CSV artifacts.
     verbose : bool, default=True
-        Enable logging progress.
+        Enable progress logging.
     """
 
     def __init__(
