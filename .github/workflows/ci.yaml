@@ -43,7 +43,7 @@ jobs:
       - name: Run Tests
         run: |
           # Calling via python -m ensures pytest sees the installed package
-          python -m pytest src/tests/
+          python -m pytest tests/
 
   build:
     name: Build Distribution
