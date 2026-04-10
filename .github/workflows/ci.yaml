@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+# Environment variables applied to all jobs
+env:
+  # Opt into Node.js 24 to silence deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     name: Run Tests & Lint
@@ -13,6 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Testing across all standard Python versions
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
@@ -31,18 +37,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # The --system flag tells uv to use the GitHub-provided Python
+          # Explicitly use --system to avoid venv errors on the GitHub runner
           uv pip install --system -e ".[test]"
           uv pip install --system ruff
 
       - name: Lint with Ruff
         run: |
-          # Calling via python -m is the safest way in CI
+          # Use python -m to ensure we use the version from the matrix
           python -m ruff check .
 
       - name: Run Tests
         run: |
-          # Calling via python -m ensures pytest sees the installed package
+          # Running pytest from the root; matches your pyproject.toml config
           python -m pytest tests/
 
   build:
@@ -51,8 +57,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+      
       - name: Build package
-        run: uv build
-        
+        run: |
+          # Verifies that the package can be bundled for distribution
+          uv build
