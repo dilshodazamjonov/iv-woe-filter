@@ -102,7 +102,9 @@ Once initial bins are created, any bin whose population share falls below `min_b
 
 Within each bin, the ratio of events (target = 1) to non-events (target = 0) is computed relative to the total event and non-event counts in the training set. WOE is the natural log of this ratio. Computation is vectorized across bins for performance.
 
-$$WOE_i = \ln\left(\frac{\%Bads_i}{\%Goods_i}\right)$$
+```math
+WOE_i = \ln\left(\frac{\%Bads_i}{\%Goods_i}\right)
+```
 
 In plain terms: a bin where bad accounts are overrepresented relative to the overall population gets a positive WOE; a bin where good accounts dominate gets a negative WOE. A WOE of zero means the bin's bad rate equals the overall bad rate.
 
@@ -111,9 +113,9 @@ The resulting WOE map — a dictionary from bin ID to WOE value — is stored on
 ### 3. IV Calculation
 
 Information Value aggregates the separation power of a feature across all its bins. It is the sum over bins of the difference in event and non-event distributions, weighted by the WOE of each bin.
-
-$$IV = \sum_{i=1}^{n} \left(\%Bads_i - \%Goods_i\right) \times WOE_i$$
-
+```math
+IV = \sum_{i=1}^{n} \left( \%Bads_i - \%Goods_i \right) \times WOE_i
+```
 In plain terms: IV measures how well a feature's bins separate defaults from non-defaults. A higher IV means stronger separation. After fitting, all IV scores are stored in `iv_table_` sorted in descending order.
 
 ### 4. Feature Selection
