@@ -1,8 +1,8 @@
 [project]
 name = "iv-woe-filter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Financial-grade IV/WOE feature selection and encoding for credit risk modeling"
-readme = "README.md"
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.9"
 authors = [
     {name = "Dilshod A'zamjonov", email = "dilshod1526@gmail.com"}

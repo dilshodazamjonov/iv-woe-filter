@@ -10,11 +10,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Fitting Logic
-# ---------------------------------------------------------------------------
-
 def fit_numeric_bins(
     series: pd.Series,
     n_bins: int,
@@ -92,10 +87,6 @@ def fit_categorical_bins(
     }
     return binning_data
 
-
-# ---------------------------------------------------------------------------
-# Application Logic
-# ---------------------------------------------------------------------------
 
 def apply_bins(
     series: pd.Series,
@@ -180,3 +171,24 @@ def merge_non_significant_bins(
             new_bin_ids[mask] = nearest_neighbor
 
     return new_bin_ids
+
+def get_bin_labels(config: dict[str, Any], series: pd.Series = None, bin_ids: np.ndarray = None) -> dict[int, str]:    
+    """Converts bin configurations into human-readable range strings."""
+    labels = {}
+    if config["is_numeric"]:
+        for i, val in enumerate(config["special_codes"]):
+            labels[-(i + 2)] = f"Special: {val}"
+        bins = config["bins"]
+        for i in range(len(bins) - 1):
+            labels[i] = f"[{bins[i]}, {bins[i+1]})"
+        labels[-1] = "Missing/Other"
+    else:
+        s_str = series.fillna("missing").astype(str)
+        temp_df = pd.DataFrame({"label": s_str, "bid": bin_ids})
+        labels = (
+            temp_df.groupby("bid")["label"]
+            .unique()
+            .apply(lambda x: ", ".join(sorted(x)))
+            .to_dict()
+        )
+    return labels

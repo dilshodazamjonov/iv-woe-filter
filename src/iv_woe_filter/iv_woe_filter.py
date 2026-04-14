@@ -1,12 +1,54 @@
-"""Orchestration module for Information Value (IV) and Weight of Evidence (WOE) filtering.
-
-Advanced IV/WOE Filter and Transformer for Credit Scoring.
-
-This class performs optimal binning, calculates Information Value (IV),
-filters features based on predictive power, and transforms raw data 
-into Weight of Evidence (WOE) values.
-
 """
+Binning, Information Value (IV), and Weight of Evidence (WOE) Transformer.
+
+This module provides a robust framework for feature selection 
+specifically tailored for Binary Classification in highly regulated environments 
+such as Credit Risk Scoring (PD models).
+
+Why use IV/WOE?
+---------------
+1. Non-linear Relationships: WOE linearizes the relationship between a feature 
+   and the log-odds of the target, allowing Logistic Regression to capture 
+   non-linear patterns.
+2. Handling Outliers & Missings: By grouping values into bins, extreme 
+   outliers and missing values are treated as distinct categories, reducing 
+   the need for manual imputation.
+3. Feature Power: Information Value (IV) provides a single, model-agnostic 
+   metric to rank the predictive power of features.
+4. Interpretability: The transformation creates a "Risk Profile" for each 
+   variable, making the model highly explainable for regulatory audits.
+
+Theoretical Definitions
+------------------------
+* WOE_i = ln( % Non-Events_i / % Events_i )
+* IV = Σ ( (% Non-Events_i - % Events_i) * WOE_i )
+
+References
+----------
+
+
+Interpretation of IV:
+- < 0.02: Useless for prediction.
+- 0.02 to 0.1: Weak predictor.
+- 0.1 to 0.3: Medium predictor.
+- 0.3 to 0.5: Strong predictor.
+- > 0.5: Suspiciously high (Potential Data Leakage).
+
+Implementation Features:
+------------------------
+- Automatic Feature Typing: Separate handling for numeric and categorical data.
+- Monotonicity Checking: Reports whether the risk profile of a feature is 
+  consistently increasing or decreasing across bins.
+- Regulatory Audit Logs: Generates CSV artifacts including bin-level statistics, 
+  IV summaries, and leakage flags for model documentation.
+- High Performance: Parallelized fitting using joblib and optimized bin 
+  mapping for high-volume datasets.
+- Special Value Handling: Isolates "System Codes" (e.g., 9999, -1) into 
+  distinct bins to prevent skewing the general population distribution.
+
+Author: Dilshod A'zamjonov
+"""
+
 
 from __future__ import annotations
 
@@ -25,40 +67,100 @@ from .binning import (
     fit_categorical_bins,
     fit_numeric_bins,
     merge_non_significant_bins,
+    get_bin_labels
 )
 from .woe import calculate_woe_iv, check_monotonicity, compute_aggregate_stats
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Main Filter Class
-# ---------------------------------------------------------------------------
-
 class IVWOEFilter(BaseEstimator, TransformerMixin):
     """
+    Scikit-learn compatible transformer for Information Value (IV) selection 
+    and Weight of Evidence (WOE) encoding.
+
+    This estimator automates the "Binning -> IV calculation -> Feature selection 
+    -> WOE transformation" pipeline. It is designed to produce stable, 
+    linearized features for Logistic Regression while generating the necessary 
+    documentation for regulatory model validation.
+
     Parameters
     ----------
     n_bins : int, default=10
-        Target bin count for numeric variables.
+        Maximum number of bins for numeric variables. The actual number of 
+        bins may be lower after merging non-significant or non-monotonic bins.
     min_iv : float, default=0.02
-        Minimum IV required to retain a feature.
+        Minimum Information Value required to retain a feature. Common industry 
+        thresholds are 0.02 (weak) or 0.05 (medium).
     max_iv_for_leakage : float, default=0.8
-        IV threshold to flag potential data leakage.
+        IV threshold used to flag potential data leakage. Features above 
+        this value are flagged in the audit reports.
     min_bin_pct : float or None, default=0.05
-        Minimum population fraction required per bin.
-    special_codes : dict[str, list[Any]] or None
-        Mapping of columns to isolated special/system values.
+        Minimum population fraction required per bin (e.g., 0.05 for 5%). 
+        Bins smaller than this are merged to ensure statistical significance.
+    special_codes : dict[str, list[Any]] or None, default=None
+        Dictionary mapping column names to lists of "special values" 
+        (e.g., -99, 9999) to be isolated in their own dedicated bins.
     encode : bool, default=True
-        If True, replace raw values with WOE during transform.
+        If True, replaces raw values with Weight of Evidence (WOE) scores.
     drop_low_iv : bool, default=True
-        If True, drop features falling below `min_iv`.
+        If True, the transform method drops columns with IV < `min_iv`.
     n_jobs : int, default=-1
-        Number of parallel CPU workers.
-    output_dir : str or None
-        Path to save regulatory audit CSV artifacts.
+        Number of parallel CPU workers for feature processing.
+    output_dir : str or None, default=None
+        Path to save CSV audit artifacts (IV summary, bin stats, feature audit).
     verbose : bool, default=True
-        Enable progress logging.
+        If True, logs progress and selection summaries to the console.
+
+    Attributes
+    ----------
+    selected_features_ : list[str]
+        List of features that met the `min_iv` criteria and were not flagged 
+        for excessive leakage.
+    iv_table_ : pd.DataFrame
+        Ranked summary of all input features and their calculated Information Values.
+    binning_ : dict[str, Any]
+        Fitted bin boundaries (for numeric) or category maps (for categorical).
+    woe_maps_ : dict[str, dict[int, float]]
+        Mapping of bin IDs to their respective WOE values for each feature.
+    monotonicity_report_ : dict[str, dict]
+        Audit of whether the WOE trend is monotonic (increasing/decreasing) 
+        across bins for each feature.
+    feature_types_ : dict[str, str]
+        Internal classification of features as 'numeric' or 'categorical'.
+    leakage_flags_ : dict[str, bool]
+        Boolean flags indicating if a feature exceeded `max_iv_for_leakage`.
+
+    Methods
+    -------
+    fit(X, y)
+        Calculates optimal bins, IV values, and WOE mappings. Identifies the subset 
+        of features falling within the predictive range [`min_iv`, `max_iv_for_leakage`].
+        
+        Returns
+        -------
+        self : IVWOEFilter
+            The fitted estimator instance, now containing the `selected_features_` 
+            subset and internal WOE dictionaries.
+            
+        Side Effects
+        ------------
+        If `output_dir` is specified, the following CSV artifacts are exported:
+        - `iv_summary.csv`: Ranked Information Value for all input features.
+        - `bin_stats.csv`: Detailed statistics per bin (Counts, Event Rates, WOE).
+        - `feature_audit.csv`: Regulatory report including monotonicity checks, 
+          feature types, and leakage flags.
+
+    transform(X)
+        Applies the fitted binning logic and maps the resulting bins to their 
+        respective Weight of Evidence (WOE) values.
+        
+        Returns
+        -------
+        X_out : pd.DataFrame
+            The transformed dataset. If `encode=True`, raw values are replaced with 
+            WOE scores. If `drop_low_iv=True`, the DataFrame is filtered to include 
+            only the features that met the IV and leakage criteria.
+    
     """
 
     def __init__(
@@ -98,26 +200,24 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         min_bin_pct: float | None,
         specials: list[Any],
     ) -> dict[str, Any]:
-        """Internal worker to process a single column: binning -> stats -> enrichment."""
-        # 1. Binning Logic
         is_numeric = pd.api.types.is_numeric_dtype(series)
         if is_numeric:
             bin_config = fit_numeric_bins(series, n_bins, specials)
         else:
             bin_config = fit_categorical_bins(series, specials)
 
-        # Generate Bin IDs (formerly codes)
         bin_ids = apply_bins(series, bin_config)
 
-        # Optional: Merge bins based on population threshold
         if min_bin_pct:
             bin_ids = merge_non_significant_bins(bin_ids, min_bin_pct)
 
-        # 2. Stats Logic
         stats = compute_aggregate_stats(bin_ids, y)
+        
+        labels_map = get_bin_labels(bin_config, series, bin_ids)
+        stats.insert(0, "bin_range", stats.index.map(labels_map))
+
         woe_series, iv_bin_series, iv_value = calculate_woe_iv(stats)
 
-        # 3. Enrichment Logic
         stats = stats.assign(woe=woe_series, iv_bin=iv_bin_series)
         mono_info = check_monotonicity(woe_series)
 
@@ -130,6 +230,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             "monotonic": mono_info,
             "feature_type": "numeric" if is_numeric else "categorical",
         }
+
 
     def fit(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> IVWOEFilter:
         """Fit binning and calculate WOE/IV for all columns.

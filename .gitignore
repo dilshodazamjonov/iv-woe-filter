@@ -19,3 +19,4 @@ dist/
 # data
 output_dir/
 *.csv
+main.py
