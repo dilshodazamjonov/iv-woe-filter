@@ -23,10 +23,6 @@ Theoretical Definitions
 * WOE_i = ln( % Non-Events_i / % Events_i )
 * IV = Σ ( (% Non-Events_i - % Events_i) * WOE_i )
 
-References
-----------
-
-
 Interpretation of IV:
 - < 0.02: Useless for prediction.
 - 0.02 to 0.1: Weak predictor.
@@ -49,7 +45,6 @@ Implementation Features:
 Author: Dilshod A'zamjonov
 """
 
-
 from __future__ import annotations
 
 import logging
@@ -70,6 +65,7 @@ from .binning import (
     get_bin_labels
 )
 from .woe import calculate_woe_iv, check_monotonicity, compute_aggregate_stats
+from .metrics import calculate_feature_gini, calculate_psi_from_counts
 
 logger = logging.getLogger(__name__)
 
@@ -86,24 +82,21 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     Parameters
     ----------
     n_bins : int, default=10
-        Maximum number of bins for numeric variables. The actual number of 
-        bins may be lower after merging non-significant or non-monotonic bins.
+        Maximum number of bins for numeric variables.
     min_iv : float, default=0.02
-        Minimum Information Value required to retain a feature. Common industry 
-        thresholds are 0.02 (weak) or 0.05 (medium).
+        Minimum Information Value required to retain a feature.
+    min_gini : float, default=0.05
+        Minimum Gini coefficient required to retain a feature.
     max_iv_for_leakage : float, default=0.8
-        IV threshold used to flag potential data leakage. Features above 
-        this value are flagged in the audit reports.
+        IV threshold used to flag potential data leakage.
     min_bin_pct : float or None, default=0.05
-        Minimum population fraction required per bin (e.g., 0.05 for 5%). 
-        Bins smaller than this are merged to ensure statistical significance.
+        Minimum population fraction required per bin (e.g., 0.05 for 5%).
     special_codes : dict[str, list[Any]] or None, default=None
-        Dictionary mapping column names to lists of "special values" 
-        (e.g., -99, 9999) to be isolated in their own dedicated bins.
+        Dictionary mapping column names to lists of "special values" to be isolated.
     encode : bool, default=True
         If True, replaces raw values with Weight of Evidence (WOE) scores.
     drop_low_iv : bool, default=True
-        If True, the transform method drops columns with IV < `min_iv`.
+        If True, the transform method drops columns failing IV/Gini thresholds.
     n_jobs : int, default=-1
         Number of parallel CPU workers for feature processing.
     output_dir : str or None, default=None
@@ -114,17 +107,17 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     Attributes
     ----------
     selected_features_ : list[str]
-        List of features that met the `min_iv` criteria and were not flagged 
-        for excessive leakage.
+        List of features that met the IV, Gini, and leakage criteria.
     iv_table_ : pd.DataFrame
-        Ranked summary of all input features and their calculated Information Values.
+        Ranked summary of all input features and their calculated IV and Gini.
     binning_ : dict[str, Any]
         Fitted bin boundaries (for numeric) or category maps (for categorical).
     woe_maps_ : dict[str, dict[int, float]]
         Mapping of bin IDs to their respective WOE values for each feature.
+    reference_distributions_ : dict[str, pd.Series]
+        Bin counts from the training data, used for later PSI calculation.
     monotonicity_report_ : dict[str, dict]
-        Audit of whether the WOE trend is monotonic (increasing/decreasing) 
-        across bins for each feature.
+        Audit of whether the WOE trend is monotonic across bins for each feature.
     feature_types_ : dict[str, str]
         Internal classification of features as 'numeric' or 'categorical'.
     leakage_flags_ : dict[str, bool]
@@ -133,40 +126,18 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     Methods
     -------
     fit(X, y)
-        Calculates optimal bins, IV values, and WOE mappings. Identifies the subset 
-        of features falling within the predictive range [`min_iv`, `max_iv_for_leakage`].
-        
-        Returns
-        -------
-        self : IVWOEFilter
-            The fitted estimator instance, now containing the `selected_features_` 
-            subset and internal WOE dictionaries.
-            
-        Side Effects
-        ------------
-        If `output_dir` is specified, the following CSV artifacts are exported:
-        - `iv_summary.csv`: Ranked Information Value for all input features.
-        - `bin_stats.csv`: Detailed statistics per bin (Counts, Event Rates, WOE).
-        - `feature_audit.csv`: Regulatory report including monotonicity checks, 
-          feature types, and leakage flags.
-
+        Calculates optimal bins, IV values, Gini, and WOE mappings.
     transform(X)
-        Applies the fitted binning logic and maps the resulting bins to their 
-        respective Weight of Evidence (WOE) values.
-        
-        Returns
-        -------
-        X_out : pd.DataFrame
-            The transformed dataset. If `encode=True`, raw values are replaced with 
-            WOE scores. If `drop_low_iv=True`, the DataFrame is filtered to include 
-            only the features that met the IV and leakage criteria.
-    
+        Applies the fitted binning logic and maps bins to WOE values.
+    calculate_psi(X, save=True)
+        Calculates the Population Stability Index (PSI) against a new dataset and exports report.
     """
 
     def __init__(
         self,
         n_bins: int = 10,
         min_iv: float = 0.02,
+        min_gini: float = 0.05,
         max_iv_for_leakage: float = 0.8,
         min_bin_pct: float | None = 0.05,
         special_codes: dict[str, list[Any]] | None = None,
@@ -178,6 +149,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     ) -> None:
         self.n_bins = n_bins
         self.min_iv = min_iv
+        self.min_gini = min_gini
         self.max_iv_for_leakage = max_iv_for_leakage
         self.min_bin_pct = min_bin_pct
         self.special_codes = special_codes or {}
@@ -189,7 +161,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
 
     def __repr__(self) -> str:
         return (f"IVWOEFilter(n_bins={self.n_bins}, min_iv={self.min_iv}, "
-                f"encode={self.encode}, drop_low_iv={self.drop_low_iv})")
+                f"min_gini={self.min_gini}, encode={self.encode})")
 
     @staticmethod
     def _process_column(
@@ -217,6 +189,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         stats.insert(0, "bin_range", stats.index.map(labels_map))
 
         woe_series, iv_bin_series, iv_value = calculate_woe_iv(stats)
+        gini_value = calculate_feature_gini(bin_ids, woe_series.to_dict(), y)
 
         stats = stats.assign(woe=woe_series, iv_bin=iv_bin_series)
         mono_info = check_monotonicity(woe_series)
@@ -224,6 +197,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         return {
             "column": col_name,
             "iv": iv_value,
+            "gini": gini_value,
             "bin_config": bin_config,
             "stats": stats,
             "woe_map": woe_series.to_dict(),
@@ -231,22 +205,8 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             "feature_type": "numeric" if is_numeric else "categorical",
         }
 
-
     def fit(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> IVWOEFilter:
-        """Fit binning and calculate WOE/IV for all columns.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Training features.
-        y : pd.Series or np.ndarray
-            Binary target variable (0/1).
-
-        Returns
-        -------
-        IVWOEFilter
-            The fitted estimator.
-        """
+        """Fit binning and calculate WOE/IV for all columns."""
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -268,11 +228,12 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             for col in columns
         )
 
-        # Initialize fit attributes
         self.binning_: dict[str, Any] = {}
         self.woe_maps_: dict[str, Any] = {}
         self.iv_table_data_: dict[str, float] = {}
+        self.gini_table_data_: dict[str, float] = {}
         self._per_feature_stats: dict[str, pd.DataFrame] = {}
+        self.reference_distributions_: dict[str, pd.Series] = {}
         self.monotonicity_report_: dict[str, Any] = {}
         self.feature_types_: dict[str, str] = {}
         self.leakage_flags_: dict[str, bool] = {}
@@ -280,21 +241,27 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         for res in results:
             col = res["column"]
             iv_val = res["iv"]
+            gini_val = res["gini"]
             self.binning_[col] = res["bin_config"]
             self.woe_maps_[col] = res["woe_map"]
             self.iv_table_data_[col] = iv_val
+            self.gini_table_data_[col] = gini_val
             self._per_feature_stats[col] = res["stats"]
+            self.reference_distributions_[col] = res["stats"]["count"]
             self.monotonicity_report_[col] = res["monotonic"]
             self.feature_types_[col] = res["feature_type"]
             self.leakage_flags_[col] = iv_val > self.max_iv_for_leakage
 
-        # Selection
-        self.iv_table_ = pd.DataFrame.from_dict(
-            self.iv_table_data_, orient="index", columns=["IV"]
+        self.iv_table_ = pd.DataFrame(
+            {
+                "IV": self.iv_table_data_,
+                "Gini": self.gini_table_data_,
+            }
         ).sort_values("IV", ascending=False)
 
         self.selected_features_ = self.iv_table_[
-            self.iv_table_["IV"] >= self.min_iv
+            (self.iv_table_["IV"] >= self.min_iv) & 
+            (self.iv_table_["Gini"] >= self.min_gini)
         ].index.tolist()
 
         if self.output_dir:
@@ -306,22 +273,11 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Apply fitted binning and WOE transformation.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Features to transform.
-
-        Returns
-        -------
-        pd.DataFrame
-            Transformed features. If encode=True, values are Weight of Evidence.
-        """
+        """Apply fitted binning and WOE transformation."""
         check_is_fitted(self, ["selected_features_", "binning_", "woe_maps_"])
 
         cols_to_process = (
-            self.selected_features_ if self.drop_low_iv else X.columns.tolist()
+            self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
         )
         X_out = X[cols_to_process].copy()
 
@@ -330,14 +286,64 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
 
         for col in cols_to_process:
             bin_ids = apply_bins(X_out[col], self.binning_[col])
-            # High performance dictionary mapping with index preservation
             w_map = self.woe_maps_[col]
             X_out[col] = pd.Series(bin_ids, index=X_out.index).map(w_map).fillna(0.0)
 
         return X_out
 
+    def calculate_psi(self, X: pd.DataFrame, save: bool = True) -> pd.DataFrame:
+        """Calculate Population Stability Index (PSI) on a new dataset.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            New dataset (e.g., test or validation set) to compare against training.
+        save : bool, default=True
+            If True and output_dir is configured, saves results to 'stability_report.csv'.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing the PSI score and shift status for each selected feature.
+        """
+        check_is_fitted(self, ["binning_", "reference_distributions_", "selected_features_"])
+        
+        psi_records = []
+        cols_to_process = (
+            self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
+        )
+        cols_to_process = [c for c in cols_to_process if c in X.columns]
+        
+        for col in cols_to_process:
+            bin_ids = apply_bins(X[col], self.binning_[col])
+            actual_counts = pd.Series(bin_ids).value_counts()
+            expected_counts = self.reference_distributions_[col]
+            
+            psi_total, _ = calculate_psi_from_counts(expected_counts, actual_counts)
+            
+            status = "Stable"
+            if psi_total >= 0.2:
+                status = "Significant Shift"
+            elif psi_total >= 0.1:
+                status = "Minor Shift"
+                
+            psi_records.append({
+                "feature": col,
+                "PSI": psi_total,
+                "status": status
+            })
+            
+        df_psi = pd.DataFrame(psi_records)
+        if not df_psi.empty:
+            df_psi = df_psi.sort_values("PSI", ascending=False).reset_index(drop=True)
+            
+        if save and self.output_dir:
+            os.makedirs(self.output_dir, exist_ok=True)
+            df_psi.to_csv(os.path.join(self.output_dir, "stability_report.csv"), index=False)
+            
+        return df_psi
+
     def _save_artifacts(self) -> None:
-        """Internal helper to save CSV audit files."""
         self.iv_table_.to_csv(os.path.join(self.output_dir, "iv_summary.csv"))
 
         bin_stats = pd.concat(
@@ -352,6 +358,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
                     "feature": col,
                     "type": self.feature_types_[col],
                     "IV": self.iv_table_data_[col],
+                    "Gini": self.gini_table_data_[col],
                     "is_monotonic": self.monotonicity_report_[col]["is_monotonic"],
                     "direction": self.monotonicity_report_[col]["direction"],
                     "leakage_flag": self.leakage_flags_[col],
@@ -364,4 +371,4 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self, input_features: list[str] | None = None) -> list[str]:
         """Return list of selected feature names for Scikit-Learn pipeline compatibility."""
         check_is_fitted(self, "selected_features_")
-        return self.selected_features_
+        return self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
