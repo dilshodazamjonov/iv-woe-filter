@@ -1,6 +1,6 @@
 # iv-woe-filter
 
-Financial-grade IV filtering and WOE transformation for credit risk feature preprocessing.
+Financial-grade IV filtering, Gini ranking, WOE transformation, and population stability auditing for credit risk feature preprocessing.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -16,7 +16,7 @@ In credit risk modeling, WOE encoding and IV-based feature selection are standar
 
 The consequences are familiar — model validation findings, scorecard drift, leakage that surfaces only in production, and review cycles that require reconstructing preprocessing decisions from memory or scattered notebooks.
 
-`iv-woe-filter` addresses this directly. It wraps the full IV/WOE preprocessing pipeline — binning, merging, special-code isolation, WOE encoding, feature selection, leakage risk flagging, and monotonicity auditing — into a single, sklearn-compatible transformer. Every fit is reproducible, every decision is logged, and every artifact needed for internal governance review is written automatically.
+`iv-woe-filter` addresses this directly. It wraps the full IV/WOE preprocessing pipeline — binning, merging, special-code isolation, WOE encoding, IV-based feature selection, Gini-based rank-ordering validation, leakage risk flagging, monotonicity auditing, and population stability measurement — into a single, sklearn-compatible transformer. Every fit is reproducible, every decision is logged, and every artifact needed for internal governance review is written automatically.
 
 ---
 
@@ -24,10 +24,43 @@ The consequences are familiar — model validation findings, scorecard drift, le
 
 ### Install
 
+**pip (any platform)**
+
 ```bash
 pip install iv-woe-filter
-# or
+```
+
+**pip inside a virtual environment (recommended)**
+
+```bash
+# macOS / Linux
+python -m venv .venv
+source .venv/bin/activate
+pip install iv-woe-filter
+
+# Windows (Command Prompt)
+python -m venv .venv
+.venv\Scripts\activate
+pip install iv-woe-filter
+
+# Windows (PowerShell)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install iv-woe-filter
+```
+
+**uv**
+
+```bash
 uv add iv-woe-filter
+```
+
+**conda**
+
+```bash
+conda create -n credit-risk python=3.11
+conda activate credit-risk
+pip install iv-woe-filter   # iv-woe-filter is not on conda-forge; install via pip into the conda env
 ```
 
 ### Usage Example
@@ -37,18 +70,38 @@ import pandas as pd
 from sklearn.datasets import make_classification
 from iv_woe_filter import IVWOEFilter
 
-X_arr, y = make_classification(n_samples=5000, n_features=10, n_informative=6, random_state=42)
+# 1. Generate synthetic data
+X_arr, y = make_classification(
+    n_samples=5000,
+    n_features=10,
+    n_informative=6,
+    random_state=42
+)
 X = pd.DataFrame(X_arr, columns=[
     "bureau_score", "months_employed", "loan_to_value", "num_delinquencies",
     "credit_utilisation", "income_band", "months_since_last_default",
     "debt_to_income", "num_inquiries", "age_at_app",
 ])
 
-filter_ = IVWOEFilter(min_iv=0.02, min_bin_pct=0.05, n_jobs=-1, output_dir="audit/")
+# 2. Fit the filter (train phase)
+filter_ = IVWOEFilter(
+    min_iv=0.02,
+    min_gini=0.05,
+    drop_unselected=True,
+    output_dir="audit/",
+)
 X_woe = filter_.fit_transform(X, y)
 
-print(filter_.iv_table_)          # IV scores for all features
-print(filter_.selected_features_) # features that passed the threshold
+print(filter_.iv_table_)          # IV and Gini scores for all features
+print(filter_.selected_features_)  # Features that passed both IV and Gini thresholds
+
+# 3. Simulate a population shift (out-of-time phase)
+X_test = X.copy()
+X_test["age_at_app"] += 2.0
+
+# 4. Audit feature stability (PSI)
+psi_report = filter_.calculate_psi(X_test, save=True)
+print(psi_report)                 # PSI score and shift status
 ```
 
 ### Pipeline Usage
@@ -56,9 +109,10 @@ print(filter_.selected_features_) # features that passed the threshold
 ```python
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
+from iv_woe_filter import IVWOEFilter
 
 pipe = Pipeline([
-    ("woe",   IVWOEFilter(min_iv=0.02, n_jobs=-1)),
+    ("woe",   IVWOEFilter(min_iv=0.02, min_gini=0.05, n_jobs=-1)),
     ("model", LogisticRegression()),
 ])
 pipe.fit(X_train, y_train)
@@ -73,6 +127,7 @@ pipe.fit(X_train, y_train)
 | Capability | Description |
 |---|---|
 | IV-based feature filtering | Features that fall below a configurable IV threshold are excluded at transform time. The threshold and all IV scores are recorded. |
+| Gini-based rank-ordering validation | Gini is derived from ROC-AUC using `2 * max(AUC, 1 - AUC) - 1` and used as a secondary selection criterion alongside IV. Features below the `min_gini` threshold are excluded, ensuring retained features demonstrate meaningful predictive separation. |
 | WOE encoding | Raw feature values are replaced with Weight of Evidence scores derived from the training distribution. Encoding is applied consistently via the stored WOE map at transform time. |
 | Quantile binning | Numeric features are binned into equal-frequency intervals, ensuring adequate event exposure per bin. |
 | Categorical support | String and low-cardinality integer columns are handled natively; no manual encoding is required before fitting. |
@@ -80,8 +135,9 @@ pipe.fit(X_train, y_train)
 | Special codes isolation | Sentinel values (e.g. `-99`, `9999`) are removed from the continuous distribution before binning and assigned dedicated WOE bins, preserving their signal without distorting quantile boundaries. |
 | Target proxy signal flagging | Features with IV above a configurable upper threshold are flagged as potential target proxy signals and recorded in the audit output for modeler review. |
 | Monotonicity auditing | The WOE trend direction is checked across ordered bins for every numeric feature. Non-monotonic features are flagged in the audit output. |
+| Population Stability Index (PSI) | `calculate_psi()` compares training-time bin distributions against a new dataset to detect population drift, producing a per-feature stability report. |
 | Parallel processing | All per-feature operations run in parallel via `joblib`. |
-| Audit artifact generation | Three structured CSV files are written at the end of every `fit()`, covering IV scores, bin-level statistics, and per-feature governance diagnostics. |
+| Audit artifact generation | Structured CSV files are written at the end of every `fit()` and `calculate_psi()` call, covering IV scores, Gini coefficients, bin-level statistics, per-feature governance diagnostics, and population stability. |
 
 ---
 
@@ -89,7 +145,7 @@ pipe.fit(X_train, y_train)
 
 ```
 raw features  →  special code isolation  →  quantile binning  →  small bin merging
-      →  WOE computation  →  IV calculation  →  feature selection  →  audit logs
+      →  WOE computation  →  IV + Gini calculation  →  feature selection  →  audit logs
 ```
 
 ### 1. Binning
@@ -110,21 +166,49 @@ In plain terms: a bin where bad accounts are overrepresented relative to the ove
 
 The resulting WOE map — a dictionary from bin ID to WOE value — is stored on the fitted object and applied at `transform()` time.
 
-### 3. IV Calculation
+### 3. IV and Gini Calculation
 
 Information Value aggregates the separation power of a feature across all its bins. It is the sum over bins of the difference in event and non-event distributions, weighted by the WOE of each bin.
+
 ```math
 IV = \sum_{i=1}^{n} \left( \%Bads_i - \%Goods_i \right) \times WOE_i
 ```
+
 In plain terms: IV measures how well a feature's bins separate defaults from non-defaults. A higher IV means stronger separation. After fitting, all IV scores are stored in `iv_table_` sorted in descending order.
+
+Gini measures how well the raw feature ranks good versus bad observations, regardless of how it is binned. It is derived from the feature-level ROC-AUC and expressed on a 0–1 scale.
+
+```math
+Gini = 2 \times \max(AUC,\; 1 - AUC) - 1
+```
+
+Gini and IV are complementary. IV reflects the aggregate separation signal as captured by the chosen bin structure; Gini evaluates the underlying rank-ordering quality of the raw feature, independent of any binning decisions. Both are recorded in `iv_table_` and `feature_audit.csv`.
 
 ### 4. Feature Selection
 
-Features with IV below `min_iv` are excluded from the output of `transform()` when `drop_low_iv=True`. Features with IV above `max_iv_for_leakage` are retained but flagged in `leakage_flags_` and in the audit output. The selection logic is deterministic and fully inspectable via fitted attributes.
+Features must satisfy both the IV and Gini thresholds to be retained. Features with IV below `min_iv` or Gini below `min_gini` are excluded from the output of `transform()` when `drop_unselected=True`. Features with IV above `max_iv_for_leakage` are retained but flagged in `leakage_flags_` and in the audit output. The selection logic is deterministic and fully inspectable via fitted attributes.
 
-### 5. Audit Generation
+### 5. Stability Auditing (PSI)
 
-If `output_dir` is set, three CSV files are written automatically at the end of `fit()`. These files record every binning decision, WOE value, IV score, and governance flag produced during the fit — see the Audit and Governance Outputs section for details.
+After fitting, `calculate_psi(X_test, save=True)` compares the bin distribution observed during training against the distribution in a new dataset — typically an out-of-time holdout or a recent production sample. If the population has shifted since the model was trained, the proportion of observations falling into each bin will differ from what was seen at fit time. PSI quantifies this divergence per feature: a low PSI means the distribution is stable; a high PSI signals that the feature's population has drifted and model performance may be affected.
+
+Formally, PSI is computed as the sum over bins of the log-weighted difference between the new dataset distribution (*Actual*) and the training distribution (*Expected*):
+
+```math
+PSI = \sum_{i=1}^{n} \left( Actual_i - Expected_i \right) \times \ln\left(\frac{Actual_i}{Expected_i}\right)
+```
+
+PSI is interpreted against configurable thresholds set via `psi_thresholds`:
+
+- Below the lower threshold: distribution is stable, no action required.
+- Between the two thresholds: moderate shift, worth monitoring.
+- Above the upper threshold: significant population drift, model performance should be re-evaluated.
+
+The method returns a DataFrame with one row per feature and, if `save=True`, writes `stability_report.csv` to `output_dir`. PSI auditing does not require refitting and can be run at any point after `fit()`.
+
+### 6. Audit Generation
+
+If `output_dir` is set, CSV files are written automatically at the end of `fit()`. These files record every binning decision, WOE value, IV score, Gini coefficient, and governance flag produced during the fit — see the Audit and Governance Outputs section for details.
 
 ---
 
@@ -136,11 +220,13 @@ If `output_dir` is set, three CSV files are written automatically at the end of 
 |---|---|---|---|
 | `n_bins` | `int` | `10` | Target number of quantile bins for numeric features |
 | `min_iv` | `float` | `0.02` | Minimum IV to retain a feature at transform time |
+| `min_gini` | `float` | `0.05` | Minimum Gini coefficient to retain a feature at transform time |
 | `max_iv_for_leakage` | `float` | `0.8` | Features with IV above this value are flagged as potential target proxy signals |
 | `min_bin_pct` | `float or None` | `0.05` | Minimum bin population share (0–1); bins below this are merged |
 | `special_codes` | `dict or None` | `{}` | Per-feature lists of sentinel values to isolate before binning |
 | `encode` | `bool` | `True` | If `True`, `transform()` returns float WOE values. If `False`, returns integer bin IDs (zero-indexed, assigned during fit); useful for debugging binning decisions before encoding. |
-| `drop_low_iv` | `bool` | `True` | If `True`, features below `min_iv` are excluded from `transform()` output |
+| `drop_unselected` | `bool` | `True` | If `True`, features that do not meet both the `min_iv` and `min_gini` thresholds are excluded from `transform()` output |
+| `psi_thresholds` | `tuple[float, float]` | `(0.1, 0.2)` | Lower and upper PSI thresholds used to classify each feature as stable, moderate shift, or significant drift in the stability report |
 | `n_jobs` | `int` | `-1` | Number of parallel workers passed to `joblib` (`-1` = all cores) |
 | `output_dir` | `str or None` | `None` | Directory for audit CSV artifacts; no files are written if `None` |
 | `verbose` | `bool` | `True` | If `True`, progress is logged via the standard `logging` module |
@@ -151,30 +237,32 @@ These attributes are available after calling `fit()`.
 
 | Attribute | Type | Description |
 |---|---|---|
-| `iv_table_` | `pd.DataFrame` | IV scores for all processed features, sorted descending |
-| `selected_features_` | `list[str]` | Features that met the `min_iv` threshold |
+| `iv_table_` | `pd.DataFrame` | IV and Gini scores for all processed features, sorted descending by IV |
+| `selected_features_` | `list[str]` | Features that met both the `min_iv` and `min_gini` thresholds |
 | `woe_maps_` | `dict[str, dict]` | Bin-to-WOE mapping per feature, applied at transform time |
 | `binning_` | `dict[str, Any]` | Fitted bin configuration per feature |
 | `monotonicity_report_` | `dict[str, Any]` | Monotonicity check results per feature, including direction |
 | `leakage_flags_` | `dict[str, bool]` | `True` for each feature whose IV exceeded `max_iv_for_leakage` |
 | `feature_types_` | `dict[str, str]` | `"numeric"` or `"categorical"` per feature |
+| `reference_distributions_` | `dict[str, pd.Series]` | Training-time bin distributions stored per feature; used as the expected baseline when `calculate_psi()` is called |
 
 ---
 
 ## Audit and Governance Outputs
 
-When `output_dir` is specified, the following files are written to disk at the end of every `fit()` call. Their primary purpose is to support model validation reviews and internal governance documentation.
+When `output_dir` is specified, the following files are written to disk at the end of every `fit()` call. Their primary purpose is to support model validation reviews and internal governance documentation. `stability_report.csv` is written when `calculate_psi(save=True)` is called.
 
 ```
 audit_outputs/
     iv_summary.csv
     bin_stats.csv
     feature_audit.csv
+    stability_report.csv
 ```
 
 ### `iv_summary.csv`
 
-One row per feature. Contains the IV score for every feature processed during fit, sorted by descending IV. This file is the starting point for a model validation team reviewing feature selection decisions — it records what was considered, what was kept, and the predictive signal behind each decision.
+One row per feature. Contains the IV score and Gini coefficient for every feature processed during fit, sorted by descending IV. This file is the starting point for a model validation team reviewing feature selection decisions — it records what was considered, what was kept, and the predictive signal behind each decision.
 
 ### `bin_stats.csv`
 
@@ -182,7 +270,11 @@ One row per bin per feature. Contains bin boundaries (or category labels), event
 
 ### `feature_audit.csv`
 
-One row per feature. Contains feature type, IV, monotonicity direction, and leakage risk flag. This file is designed for the governance layer — it answers the three questions most commonly asked during internal model risk reviews: how predictive is this feature, does its WOE trend make directional sense, and is there a risk that its predictive signal is too close to the target.
+One row per feature. Contains feature type, IV, Gini, monotonicity direction, and leakage risk flag. This file is designed for the governance layer — it answers the four questions most commonly asked during internal model risk reviews: how predictive is this feature, does it exhibit adequate rank-ordering separation, does its WOE trend make directional sense, and is there a risk that its predictive signal is too close to the target.
+
+### `stability_report.csv`
+
+One row per feature. Contains the PSI score computed against the dataset passed to `calculate_psi()`, along with a shift status derived from `psi_thresholds` (`stable`, `moderate`, or `significant`). This file is intended for periodic out-of-time monitoring and provides a documented record of population drift assessments across model deployment cycles.
 
 ---
 
@@ -214,7 +306,7 @@ After WOE computation, `iv-woe-filter` checks the trend direction for every nume
 
 ### Parallel Processing
 
-Per-feature operations — binning, WOE and IV computation, monotonicity checking, and leakage flagging — are dispatched in parallel using `joblib.Parallel`. On datasets with a large number of features, this materially reduces the wall time of the fit step.
+Per-feature operations — binning, WOE and IV computation, Gini calculation, monotonicity checking, and leakage flagging — are dispatched in parallel using `joblib.Parallel`. On datasets with a large number of features, this materially reduces the wall time of the fit step.
 
 ```python
 IVWOEFilter(n_jobs=-1)   # all logical cores
@@ -231,7 +323,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 
 pipe = Pipeline([
-    ("woe",   IVWOEFilter(min_iv=0.02, n_jobs=-1)),
+    ("woe",   IVWOEFilter(min_iv=0.02, min_gini=0.05, n_jobs=-1)),
     ("model", LogisticRegression()),
 ])
 pipe.fit(X_train, y_train)
@@ -306,7 +398,8 @@ iv-woe-filter/
             __init__.py
             iv_woe_filter.py     # IVWOEFilter transformer
             binning.py           # Quantile and categorical binning logic
-            woe.py               # Vectorized WOE / IV computation and monotonicity checks 
+            woe.py               # Vectorized WOE / IV computation and monotonicity checks
+            metrics.py           # Gini and PSI calculations
     tests/
         test_iv_woe_filter.py
     pyproject.toml

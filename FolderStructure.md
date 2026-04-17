@@ -16,15 +16,16 @@
             ├── __init__.py
             ├── binning.py
             ├── iv_woe_filter.py
+            ├── metrics.py
             ├── woe.py
-        └── 📁ivpackage.egg-info
+        └── 📁iv_woe_filter.egg-info
             ├── dependency_links.txt
             ├── PKG-INFO
             ├── requires.txt
             ├── SOURCES.txt
             ├── top_level.txt
-        └── 📁tests
-            ├── test_iv_woe_filter.py
+    └── 📁tests
+        ├── test_iv_woe_filter.py
     ├── .gitignore
     ├── .python-version
     ├── FolderStructure.md
