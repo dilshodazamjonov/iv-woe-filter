@@ -23,6 +23,10 @@ Theoretical Definitions
 * WOE_i = ln( % Non-Events_i / % Events_i )
 * IV = Σ ( (% Non-Events_i - % Events_i) * WOE_i )
 
+References
+----------
+
+
 Interpretation of IV:
 - < 0.02: Useless for prediction.
 - 0.02 to 0.1: Weak predictor.
@@ -95,8 +99,11 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         Dictionary mapping column names to lists of "special values" to be isolated.
     encode : bool, default=True
         If True, replaces raw values with Weight of Evidence (WOE) scores.
-    drop_low_iv : bool, default=True
-        If True, the transform method drops columns failing IV/Gini thresholds.
+    drop_unselected : bool, default=True
+        If True, the transform method keeps only features that passed selection criteria.
+        If False, no columns are dropped but encoding still applies.
+    psi_thresholds : tuple[float, float], default=(0.1, 0.2)
+        Thresholds for Minor and Significant PSI shifts.
     n_jobs : int, default=-1
         Number of parallel CPU workers for feature processing.
     output_dir : str or None, default=None
@@ -142,7 +149,8 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         min_bin_pct: float | None = 0.05,
         special_codes: dict[str, list[Any]] | None = None,
         encode: bool = True,
-        drop_low_iv: bool = True,
+        drop_unselected: bool = True,
+        psi_thresholds: tuple[float, float] = (0.1, 0.2),
         n_jobs: int = -1,
         output_dir: str | None = None,
         verbose: bool = True,
@@ -154,14 +162,16 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         self.min_bin_pct = min_bin_pct
         self.special_codes = special_codes or {}
         self.encode = encode
-        self.drop_low_iv = drop_low_iv
+        self.drop_unselected = drop_unselected
+        self.psi_thresholds = psi_thresholds
         self.n_jobs = n_jobs
         self.output_dir = output_dir
         self.verbose = verbose
 
     def __repr__(self) -> str:
         return (f"IVWOEFilter(n_bins={self.n_bins}, min_iv={self.min_iv}, "
-                f"min_gini={self.min_gini}, encode={self.encode})")
+                f"min_gini={self.min_gini}, encode={self.encode}, "
+                f"drop_unselected={self.drop_unselected})")
 
     @staticmethod
     def _process_column(
@@ -211,10 +221,13 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             os.makedirs(self.output_dir, exist_ok=True)
 
         y_arr = np.asarray(y)
+        if set(np.unique(y_arr)) - {0, 1}:
+            raise ValueError("Target y must be binary (0/1).")
+
         columns = X.columns.tolist()
 
         if self.verbose:
-            logger.info(f"Fitting {len(columns)} features...")
+            logger.info("Fitting %d features...", len(columns))
 
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(self._process_column)(
@@ -268,7 +281,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             self._save_artifacts()
 
         if self.verbose:
-            logger.info(f"Selected {len(self.selected_features_)} features.")
+            logger.info("Selected %d features.", len(self.selected_features_))
 
         return self
 
@@ -277,7 +290,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         check_is_fitted(self, ["selected_features_", "binning_", "woe_maps_"])
 
         cols_to_process = (
-            self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
+            self.selected_features_ if self.drop_unselected else list(self.binning_.keys())
         )
         X_out = X[cols_to_process].copy()
 
@@ -304,15 +317,16 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         Returns
         -------
         pd.DataFrame
-            DataFrame containing the PSI score and shift status for each selected feature.
+            DataFrame containing the PSI score and shift status for each feature.
         """
         check_is_fitted(self, ["binning_", "reference_distributions_", "selected_features_"])
         
         psi_records = []
         cols_to_process = (
-            self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
+            self.selected_features_ if self.drop_unselected else list(self.binning_.keys())
         )
         cols_to_process = [c for c in cols_to_process if c in X.columns]
+        low, high = self.psi_thresholds
         
         for col in cols_to_process:
             bin_ids = apply_bins(X[col], self.binning_[col])
@@ -322,9 +336,9 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             psi_total, _ = calculate_psi_from_counts(expected_counts, actual_counts)
             
             status = "Stable"
-            if psi_total >= 0.2:
+            if psi_total >= high:
                 status = "Significant Shift"
-            elif psi_total >= 0.1:
+            elif psi_total >= low:
                 status = "Minor Shift"
                 
             psi_records.append({
@@ -371,4 +385,4 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self, input_features: list[str] | None = None) -> list[str]:
         """Return list of selected feature names for Scikit-Learn pipeline compatibility."""
         check_is_fitted(self, "selected_features_")
-        return self.selected_features_ if self.drop_low_iv else list(self.binning_.keys())
+        return self.selected_features_ if self.drop_unselected else list(self.binning_.keys())
