@@ -128,3 +128,9 @@ def check_monotonicity(woe: pd.Series) -> dict[str, Any]:
         "is_monotonic": bool(is_inc or is_dec),
         "direction": "increasing" if is_inc else "decreasing" if is_dec else "none",
     }
+
+
+def check_numeric_monotonicity(woe: pd.Series) -> dict[str, Any]:
+    """Check monotonicity across only the ordered continuous bins of a numeric feature."""
+    numeric_bins = woe[woe.index >= 0]
+    return check_monotonicity(numeric_bins)

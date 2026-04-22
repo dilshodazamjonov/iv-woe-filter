@@ -68,8 +68,13 @@ from .binning import (
     merge_non_significant_bins,
     get_bin_labels
 )
-from .woe import calculate_woe_iv, check_monotonicity, compute_aggregate_stats
-from .metrics import calculate_feature_gini, calculate_psi_from_counts
+from .woe import (
+    calculate_woe_iv,
+    check_monotonicity,
+    check_numeric_monotonicity,
+    compute_aggregate_stats,
+)
+from .metrics import calculate_feature_gini, calculate_gini, calculate_psi_from_counts
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +119,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     Attributes
     ----------
     selected_features_ : list[str]
-        List of features that met the IV, Gini, and leakage criteria.
+        List of features that met the IV and Gini selection criteria.
     iv_table_ : pd.DataFrame
         Ranked summary of all input features and their calculated IV and Gini.
     binning_ : dict[str, Any]
@@ -172,6 +177,19 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         return (f"IVWOEFilter(n_bins={self.n_bins}, min_iv={self.min_iv}, "
                 f"min_gini={self.min_gini}, encode={self.encode}, "
                 f"drop_unselected={self.drop_unselected})")
+    
+    def _validate_target(self, y: np.ndarray) -> None:
+        """Validate that target y is binary (0/1) and contains no NaN."""
+        if np.isnan(y).any():
+            raise ValueError("Target contains NaN values")
+
+        unique_vals = np.unique(y)
+        if len(unique_vals) > 2:
+            raise ValueError(f"Target must be binary (0/1), got {len(unique_vals)} unique values: {unique_vals}")
+        if not np.all(np.isin(unique_vals, [0, 1])):
+            raise ValueError(f"Target values must be 0 or 1, got: {unique_vals}")
+        if y.sum() == 0 or y.sum() == len(y):
+            raise ValueError("Target must contain both classes 0 and 1.")
 
     @staticmethod
     def _process_column(
@@ -182,7 +200,17 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         min_bin_pct: float | None,
         specials: list[Any],
     ) -> dict[str, Any]:
+
+        if specials:
+            missing = [s for s in specials if s not in series.values]
+            if missing:
+                logger.warning(
+                    "Special codes %s not found in feature '%s'. "
+                    "These will create empty bins.",
+                    missing, col_name
+                )
         is_numeric = pd.api.types.is_numeric_dtype(series)
+        
         if is_numeric:
             bin_config = fit_numeric_bins(series, n_bins, specials)
         else:
@@ -199,10 +227,14 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         stats.insert(0, "bin_range", stats.index.map(labels_map))
 
         woe_series, iv_bin_series, iv_value = calculate_woe_iv(stats)
-        gini_value = calculate_feature_gini(bin_ids, woe_series.to_dict(), y)
+        if is_numeric:
+            numeric_values = pd.to_numeric(series, errors="coerce").to_numpy()
+            gini_value = calculate_gini(y, numeric_values)
+        else:
+            gini_value = calculate_feature_gini(bin_ids, woe_series.to_dict(), y)
 
         stats = stats.assign(woe=woe_series, iv_bin=iv_bin_series)
-        mono_info = check_monotonicity(woe_series)
+        mono_info = check_numeric_monotonicity(woe_series) if is_numeric else check_monotonicity(woe_series)
 
         return {
             "column": col_name,
@@ -221,8 +253,8 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             os.makedirs(self.output_dir, exist_ok=True)
 
         y_arr = np.asarray(y)
-        if set(np.unique(y_arr)) - {0, 1}:
-            raise ValueError("Target y must be binary (0/1).")
+
+        self._validate_target(y_arr)
 
         columns = X.columns.tolist()
 
@@ -386,3 +418,5 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         """Return list of selected feature names for Scikit-Learn pipeline compatibility."""
         check_is_fitted(self, "selected_features_")
         return self.selected_features_ if self.drop_unselected else list(self.binning_.keys())
+
+        

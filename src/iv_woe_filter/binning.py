@@ -138,6 +138,8 @@ def apply_bins(
 def merge_non_significant_bins(
     bin_ids: np.ndarray,
     min_pct: float,
+    *,
+    protect_special_bins: bool = True,
 ) -> np.ndarray:
     """Merge bins that do not meet the minimum population threshold.
 
@@ -161,13 +163,20 @@ def merge_non_significant_bins(
     new_bin_ids = bin_ids.copy()
 
     for bin_id in unique_bins:
+        if protect_special_bins and bin_id < 0:
+            continue
+
         mask = (new_bin_ids == bin_id)
         if (mask.sum() / total_count) < min_pct:
             # Find closest bin ID to merge into
             # Use float to allow np.inf assignment
-            dist = np.abs(unique_bins.astype(float) - float(bin_id))
-            dist[unique_bins == bin_id] = np.inf
-            nearest_neighbor = unique_bins[np.argmin(dist)]
+            candidate_bins = unique_bins[unique_bins >= 0] if protect_special_bins else unique_bins
+            candidate_bins = candidate_bins[candidate_bins != bin_id]
+            if len(candidate_bins) == 0:
+                continue
+
+            dist = np.abs(candidate_bins.astype(float) - float(bin_id))
+            nearest_neighbor = candidate_bins[np.argmin(dist)]
             new_bin_ids[mask] = nearest_neighbor
 
     return new_bin_ids
