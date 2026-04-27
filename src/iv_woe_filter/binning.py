@@ -7,24 +7,108 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.tree import DecisionTreeClassifier
 
 logger = logging.getLogger(__name__)
+
+
+SUPPORTED_BINNING_METHODS = {"quantile", "tree"}
+
+
+def _finalize_numeric_bins(bins: list[float] | np.ndarray) -> np.ndarray:
+    """Return sorted bin edges with open-ended outer boundaries."""
+    bins_array = np.asarray(bins, dtype=float)
+    bins_array = bins_array[~np.isnan(bins_array)]
+    bins_array = np.unique(bins_array)
+
+    if len(bins_array) < 2:
+        return np.array([-np.inf, np.inf])
+
+    bins_array[0], bins_array[-1] = -np.inf, np.inf
+    return bins_array
+
+
+def _fit_quantile_bins(clean_series: pd.Series, n_bins: int) -> np.ndarray:
+    try:
+        _, bins = pd.qcut(clean_series, q=n_bins, duplicates="drop", retbins=True)
+    except (ValueError, IndexError):
+        # Fallback to standard cut if qcut fails due to distribution issues.
+        _, bins = pd.cut(
+            clean_series, bins=min(n_bins, clean_series.nunique()), retbins=True
+        )
+
+    return _finalize_numeric_bins(bins)
+
+
+def _fit_tree_bins(
+    clean_series: pd.Series,
+    y: np.ndarray,
+    n_bins: int,
+    min_bin_pct: float | None,
+    random_state: int | None,
+    tree_criterion: str,
+    tree_max_depth: int | None,
+    tree_min_samples_leaf: int | float | None,
+    tree_min_samples_split: int | float,
+) -> np.ndarray:
+    valid_mask = clean_series.notna().to_numpy()
+    x = clean_series[valid_mask].to_numpy(dtype=float).reshape(-1, 1)
+    y_clean = np.asarray(y)[valid_mask]
+
+    if len(x) == 0 or len(np.unique(x)) <= 1 or len(np.unique(y_clean)) < 2 or n_bins <= 1:
+        return np.array([-np.inf, np.inf])
+
+    min_samples_leaf = tree_min_samples_leaf
+    if min_samples_leaf is None:
+        min_samples_leaf = min_bin_pct if min_bin_pct else 1
+
+    tree = DecisionTreeClassifier(
+        criterion=tree_criterion,
+        max_depth=tree_max_depth,
+        max_leaf_nodes=n_bins,
+        min_samples_leaf=min_samples_leaf,
+        min_samples_split=tree_min_samples_split,
+        random_state=random_state,
+    )
+    tree.fit(x, y_clean)
+
+    split_mask = tree.tree_.children_left != tree.tree_.children_right
+    thresholds = tree.tree_.threshold[split_mask]
+
+    if len(thresholds) == 0:
+        return np.array([-np.inf, np.inf])
+
+    return np.concatenate(([-np.inf], np.sort(np.unique(thresholds)), [np.inf]))
+
 
 def fit_numeric_bins(
     series: pd.Series,
     n_bins: int,
     special_codes: list[int | float] | None = None,
+    *,
+    binning_method: str = "quantile",
+    y: np.ndarray | None = None,
+    min_bin_pct: float | None = None,
+    random_state: int | None = 42,
+    tree_criterion: str = "gini",
+    tree_max_depth: int | None = None,
+    tree_min_samples_leaf: int | float | None = None,
+    tree_min_samples_split: int | float = 2,
 ) -> dict[str, Any]:
-    """Fit quantile-based bins for numeric data while isolating special codes.
+    """Fit numeric bins while isolating special codes.
 
     Parameters
     ----------
     series : pd.Series
         Numeric input data to be binned.
     n_bins : int
-        Target number of bins for the quantile split.
+        Target number of bins for the numeric split.
     special_codes : list of (int or float) or None
         Values to be treated as independent bins (e.g., error codes, missing flags).
+    binning_method : {"quantile", "tree"}, default="quantile"
+        Numeric binning strategy.
+    y : np.ndarray or None
+        Binary target array. Required when `binning_method="tree"`.
 
     Returns
     -------
@@ -34,28 +118,41 @@ def fit_numeric_bins(
     binning_data = {
         "is_numeric": True,
         "special_codes": special_codes or [],
+        "binning_method": binning_method,
         "bins": None,
     }
 
-    clean_series = series
-    if special_codes:
-        clean_series = series[~series.isin(special_codes)]
+    special_mask = series.isin(special_codes or [])
+    clean_series = pd.to_numeric(series[~special_mask], errors="coerce")
 
-    if clean_series.empty:
+    if clean_series.dropna().empty:
         binning_data["bins"] = np.array([-np.inf, np.inf])
         return binning_data
 
-    try:
-        _, bins = pd.qcut(clean_series, q=n_bins, duplicates="drop", retbins=True)
-    except (ValueError, IndexError):
-        # Fallback to standard cut if qcut fails due to distribution issues
-        _, bins = pd.cut(
-            clean_series, bins=min(n_bins, clean_series.nunique()), retbins=True
+    if binning_method == "quantile":
+        bins = _fit_quantile_bins(clean_series.dropna(), n_bins)
+    elif binning_method == "tree":
+        if y is None:
+            raise ValueError("Target y is required when binning_method='tree'.")
+        clean_y = np.asarray(y)[(~special_mask).to_numpy()]
+        bins = _fit_tree_bins(
+            clean_series,
+            clean_y,
+            n_bins,
+            min_bin_pct,
+            random_state,
+            tree_criterion,
+            tree_max_depth,
+            tree_min_samples_leaf,
+            tree_min_samples_split,
+        )
+    else:
+        raise ValueError(
+            f"binning_method must be one of {sorted(SUPPORTED_BINNING_METHODS)}, "
+            f"got {binning_method!r}."
         )
 
-    bins = bins.tolist()
-    bins[0], bins[-1] = -np.inf, np.inf
-    binning_data["bins"] = np.array(bins)
+    binning_data["bins"] = bins
 
     return binning_data
 
@@ -83,6 +180,7 @@ def fit_categorical_bins(
     binning_data = {
         "is_numeric": False,
         "special_codes": special_codes or [],
+        "binning_method": "categorical",
         "categories": s.unique().tolist(),
     }
     return binning_data

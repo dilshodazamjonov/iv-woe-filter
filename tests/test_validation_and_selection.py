@@ -100,3 +100,23 @@ def test_gini_column_is_present_and_bounded(sample_data):
 
     assert "Gini" in transformer.iv_table_.columns
     assert ((transformer.iv_table_["Gini"] >= 0.0) & (transformer.iv_table_["Gini"] <= 1.0)).all()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"n_bins": 0}, "n_bins"),
+        ({"min_bin_pct": 1.2}, "min_bin_pct"),
+        ({"psi_thresholds": (0.2, 0.1)}, "psi_thresholds"),
+        ({"tree_criterion": "invalid"}, "tree_criterion"),
+        ({"tree_min_samples_split": 1}, "tree_min_samples_split"),
+        ({"tree_min_samples_leaf": 0.0}, "tree_min_samples_leaf"),
+        ({"n_jobs": 0}, "n_jobs"),
+    ],
+)
+def test_parameter_validation_rejects_invalid_configuration(sample_data, kwargs, message):
+    X, y = sample_data
+    transformer = IVWOEFilter(verbose=False, **kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        transformer.fit(X, y)

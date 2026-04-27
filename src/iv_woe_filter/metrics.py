@@ -27,21 +27,22 @@ def calculate_gini(y_true: Any, y_score: Any) -> float:
     float
         The Gini coefficient (2 * AUC - 1), forced to be positive.
     """
-    try:
-        y_t = np.asarray(y_true)
-        y_s = np.asarray(y_score)
-        
-        mask = ~np.isnan(y_s)
-        y_t, y_s = y_t[mask], y_s[mask]
+    y_t = pd.to_numeric(pd.Series(y_true), errors="raise").to_numpy(dtype=float)
+    y_s = pd.to_numeric(pd.Series(y_score), errors="coerce").to_numpy(dtype=float)
 
-        if len(np.unique(y_t)) < 2:
-            return 0.0
+    if y_t.shape[0] != y_s.shape[0]:
+        raise ValueError(
+            f"y_true and y_score must have the same length, got {y_t.shape[0]} and {y_s.shape[0]}."
+        )
 
-        auc = roc_auc_score(y_t, y_s)
-        return float(2 * max(auc, 1 - auc) - 1)
-    except Exception as e:
-        logger.error(f"Failed to calculate Gini: {e}")
+    mask = ~(np.isnan(y_t) | np.isnan(y_s))
+    y_t, y_s = y_t[mask], y_s[mask]
+
+    if len(y_t) == 0 or len(np.unique(y_t)) < 2:
         return 0.0
+
+    auc = roc_auc_score(y_t, y_s)
+    return float(2 * max(auc, 1 - auc) - 1)
 
 
 def calculate_feature_gini(

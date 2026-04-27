@@ -25,8 +25,6 @@ Theoretical Definitions
 
 References
 ----------
-
-
 Interpretation of IV:
 - < 0.02: Useless for prediction.
 - 0.02 to 0.1: Weak predictor.
@@ -37,6 +35,7 @@ Interpretation of IV:
 Implementation Features:
 ------------------------
 - Automatic Feature Typing: Separate handling for numeric and categorical data.
+- Configurable Numeric Binning: Quantile or supervised tree-based thresholds.
 - Monotonicity Checking: Reports whether the risk profile of a feature is 
   consistently increasing or decreasing across bins.
 - Regulatory Audit Logs: Generates CSV artifacts including bin-level statistics, 
@@ -62,11 +61,12 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 from .binning import (
+    SUPPORTED_BINNING_METHODS,
     apply_bins,
     fit_categorical_bins,
     fit_numeric_bins,
+    get_bin_labels,
     merge_non_significant_bins,
-    get_bin_labels
 )
 from .woe import (
     calculate_woe_iv,
@@ -92,6 +92,8 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     ----------
     n_bins : int, default=10
         Maximum number of bins for numeric variables.
+    binning_method : {"quantile", "tree"}, default="quantile"
+        Strategy used to learn numeric bin boundaries.
     min_iv : float, default=0.02
         Minimum Information Value required to retain a feature.
     min_gini : float, default=0.05
@@ -109,6 +111,16 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         If False, no columns are dropped but encoding still applies.
     psi_thresholds : tuple[float, float], default=(0.1, 0.2)
         Thresholds for Minor and Significant PSI shifts.
+    random_state : int or None, default=42
+        Random state passed to tree-based binning.
+    tree_criterion : str, default="gini"
+        Split criterion used by tree-based binning.
+    tree_max_depth : int or None, default=None
+        Maximum depth used by tree-based binning.
+    tree_min_samples_leaf : int, float, or None, default=None
+        Minimum samples per tree leaf. If None, `min_bin_pct` is used when available.
+    tree_min_samples_split : int or float, default=2
+        Minimum samples required to split an internal tree node.
     n_jobs : int, default=-1
         Number of parallel CPU workers for feature processing.
     output_dir : str or None, default=None
@@ -148,6 +160,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         n_bins: int = 10,
+        binning_method: str = "quantile",
         min_iv: float = 0.02,
         min_gini: float = 0.05,
         max_iv_for_leakage: float = 0.8,
@@ -156,11 +169,17 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         encode: bool = True,
         drop_unselected: bool = True,
         psi_thresholds: tuple[float, float] = (0.1, 0.2),
+        random_state: int | None = 42,
+        tree_criterion: str = "gini",
+        tree_max_depth: int | None = None,
+        tree_min_samples_leaf: int | float | None = None,
+        tree_min_samples_split: int | float = 2,
         n_jobs: int = -1,
         output_dir: str | None = None,
         verbose: bool = True,
     ) -> None:
         self.n_bins = n_bins
+        self.binning_method = binning_method
         self.min_iv = min_iv
         self.min_gini = min_gini
         self.max_iv_for_leakage = max_iv_for_leakage
@@ -169,14 +188,19 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         self.encode = encode
         self.drop_unselected = drop_unselected
         self.psi_thresholds = psi_thresholds
+        self.random_state = random_state
+        self.tree_criterion = tree_criterion
+        self.tree_max_depth = tree_max_depth
+        self.tree_min_samples_leaf = tree_min_samples_leaf
+        self.tree_min_samples_split = tree_min_samples_split
         self.n_jobs = n_jobs
         self.output_dir = output_dir
         self.verbose = verbose
 
     def __repr__(self) -> str:
-        return (f"IVWOEFilter(n_bins={self.n_bins}, min_iv={self.min_iv}, "
-                f"min_gini={self.min_gini}, encode={self.encode}, "
-                f"drop_unselected={self.drop_unselected})")
+        return (f"IVWOEFilter(n_bins={self.n_bins}, binning_method={self.binning_method!r}, "
+                f"min_iv={self.min_iv}, min_gini={self.min_gini}, "
+                f"encode={self.encode}, drop_unselected={self.drop_unselected})")
     
     def _validate_target(self, y: np.ndarray) -> None:
         """Validate that target y is binary (0/1) and contains no NaN."""
@@ -191,14 +215,101 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         if y.sum() == 0 or y.sum() == len(y):
             raise ValueError("Target must contain both classes 0 and 1.")
 
+    def _validate_parameters(self) -> None:
+        """Validate estimator parameters before fitting."""
+        if self.binning_method not in SUPPORTED_BINNING_METHODS:
+            raise ValueError(
+                f"binning_method must be one of {sorted(SUPPORTED_BINNING_METHODS)}, "
+                f"got {self.binning_method!r}."
+            )
+        if not isinstance(self.n_bins, int) or self.n_bins < 1:
+            raise ValueError(f"n_bins must be an integer >= 1, got {self.n_bins!r}.")
+        if self.min_iv < 0:
+            raise ValueError(f"min_iv must be >= 0, got {self.min_iv!r}.")
+        if not 0 <= self.min_gini <= 1:
+            raise ValueError(f"min_gini must be between 0 and 1, got {self.min_gini!r}.")
+        if self.max_iv_for_leakage < 0:
+            raise ValueError(
+                f"max_iv_for_leakage must be >= 0, got {self.max_iv_for_leakage!r}."
+            )
+        if self.min_bin_pct is not None and not 0 < self.min_bin_pct < 1:
+            raise ValueError(
+                f"min_bin_pct must be None or a float between 0 and 1, got {self.min_bin_pct!r}."
+            )
+        if not isinstance(self.psi_thresholds, tuple) or len(self.psi_thresholds) != 2:
+            raise ValueError(
+                f"psi_thresholds must be a tuple of two floats, got {self.psi_thresholds!r}."
+            )
+        low, high = self.psi_thresholds
+        if not 0 <= low <= high:
+            raise ValueError(
+                f"psi_thresholds must satisfy 0 <= low <= high, got {self.psi_thresholds!r}."
+            )
+        if not isinstance(self.n_jobs, int) or self.n_jobs == 0:
+            raise ValueError(f"n_jobs must be a non-zero integer, got {self.n_jobs!r}.")
+        if not isinstance(self.special_codes, dict):
+            raise ValueError(f"special_codes must be a dict or None, got {type(self.special_codes).__name__}.")
+        if self.tree_criterion not in {"gini", "entropy", "log_loss"}:
+            raise ValueError(
+                "tree_criterion must be one of ['entropy', 'gini', 'log_loss'], "
+                f"got {self.tree_criterion!r}."
+            )
+        if self.tree_max_depth is not None and (
+            not isinstance(self.tree_max_depth, int) or self.tree_max_depth < 1
+        ):
+            raise ValueError(
+                f"tree_max_depth must be None or an integer >= 1, got {self.tree_max_depth!r}."
+            )
+        if self.tree_min_samples_leaf is not None:
+            if isinstance(self.tree_min_samples_leaf, int):
+                if self.tree_min_samples_leaf < 1:
+                    raise ValueError(
+                        "tree_min_samples_leaf must be >= 1 when passed as an integer, "
+                        f"got {self.tree_min_samples_leaf!r}."
+                    )
+            elif isinstance(self.tree_min_samples_leaf, float):
+                if not 0 < self.tree_min_samples_leaf < 1:
+                    raise ValueError(
+                        "tree_min_samples_leaf must be between 0 and 1 when passed as a float, "
+                        f"got {self.tree_min_samples_leaf!r}."
+                    )
+            else:
+                raise ValueError(
+                    "tree_min_samples_leaf must be None, int, or float, "
+                    f"got {type(self.tree_min_samples_leaf).__name__}."
+                )
+        if isinstance(self.tree_min_samples_split, int):
+            if self.tree_min_samples_split < 2:
+                raise ValueError(
+                    "tree_min_samples_split must be >= 2 when passed as an integer, "
+                    f"got {self.tree_min_samples_split!r}."
+                )
+        elif isinstance(self.tree_min_samples_split, float):
+            if not 0 < self.tree_min_samples_split <= 1:
+                raise ValueError(
+                    "tree_min_samples_split must be in (0, 1] when passed as a float, "
+                    f"got {self.tree_min_samples_split!r}."
+                )
+        else:
+            raise ValueError(
+                "tree_min_samples_split must be an int or float, "
+                f"got {type(self.tree_min_samples_split).__name__}."
+            )
+
     @staticmethod
     def _process_column(
         col_name: str,
         series: pd.Series,
         y: np.ndarray,
         n_bins: int,
+        binning_method: str,
         min_bin_pct: float | None,
         specials: list[Any],
+        random_state: int | None,
+        tree_criterion: str,
+        tree_max_depth: int | None,
+        tree_min_samples_leaf: int | float | None,
+        tree_min_samples_split: int | float,
     ) -> dict[str, Any]:
 
         if specials:
@@ -212,7 +323,19 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         is_numeric = pd.api.types.is_numeric_dtype(series)
         
         if is_numeric:
-            bin_config = fit_numeric_bins(series, n_bins, specials)
+            bin_config = fit_numeric_bins(
+                series,
+                n_bins,
+                specials,
+                binning_method=binning_method,
+                y=y,
+                min_bin_pct=min_bin_pct,
+                random_state=random_state,
+                tree_criterion=tree_criterion,
+                tree_max_depth=tree_max_depth,
+                tree_min_samples_leaf=tree_min_samples_leaf,
+                tree_min_samples_split=tree_min_samples_split,
+            )
         else:
             bin_config = fit_categorical_bins(series, specials)
 
@@ -255,6 +378,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         y_arr = np.asarray(y)
 
         self._validate_target(y_arr)
+        self._validate_parameters()
 
         columns = X.columns.tolist()
 
@@ -267,8 +391,14 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
                 X[col],
                 y_arr,
                 self.n_bins,
+                self.binning_method,
                 self.min_bin_pct,
                 self.special_codes.get(col, []),
+                self.random_state,
+                self.tree_criterion,
+                self.tree_max_depth,
+                self.tree_min_samples_leaf,
+                self.tree_min_samples_split,
             )
             for col in columns
         )
@@ -357,10 +487,16 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         cols_to_process = (
             self.selected_features_ if self.drop_unselected else list(self.binning_.keys())
         )
-        cols_to_process = [c for c in cols_to_process if c in X.columns]
+        missing_columns = [c for c in cols_to_process if c not in X.columns]
+        if missing_columns:
+            logger.warning(
+                "The following fitted features are missing from PSI input and will be marked as missing: %s",
+                missing_columns,
+            )
+        available_columns = [c for c in cols_to_process if c in X.columns]
         low, high = self.psi_thresholds
         
-        for col in cols_to_process:
+        for col in available_columns:
             bin_ids = apply_bins(X[col], self.binning_[col])
             actual_counts = pd.Series(bin_ids).value_counts()
             expected_counts = self.reference_distributions_[col]
@@ -378,10 +514,17 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
                 "PSI": psi_total,
                 "status": status
             })
+
+        for col in missing_columns:
+            psi_records.append({
+                "feature": col,
+                "PSI": np.nan,
+                "status": "Missing in Input"
+            })
             
         df_psi = pd.DataFrame(psi_records)
         if not df_psi.empty:
-            df_psi = df_psi.sort_values("PSI", ascending=False).reset_index(drop=True)
+            df_psi = df_psi.sort_values("PSI", ascending=False, na_position="last").reset_index(drop=True)
             
         if save and self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -403,6 +546,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
                 {
                     "feature": col,
                     "type": self.feature_types_[col],
+                    "binning_method": self.binning_[col].get("binning_method"),
                     "IV": self.iv_table_data_[col],
                     "Gini": self.gini_table_data_[col],
                     "is_monotonic": self.monotonicity_report_[col]["is_monotonic"],

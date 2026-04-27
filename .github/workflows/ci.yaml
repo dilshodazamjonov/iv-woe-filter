@@ -60,8 +60,31 @@ jobs:
       
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       
       - name: Build package
         run: |
           # Verifies that the package can be bundled for distribution
           uv build
+
+      - name: Check package metadata
+        run: |
+          uv tool run twine check dist/*
+
+      - name: Install built wheel
+        run: |
+          uv venv smoke-wheel
+          source smoke-wheel/bin/activate
+          pip install dist/*.whl
+          python -c "from iv_woe_filter import IVWOEFilter; print(IVWOEFilter.__name__)"
+
+      - name: Install built sdist
+        run: |
+          uv venv smoke-sdist
+          source smoke-sdist/bin/activate
+          pip install dist/*.tar.gz
+          python -c "from iv_woe_filter import IVWOEFilter; print(IVWOEFilter.__name__)"

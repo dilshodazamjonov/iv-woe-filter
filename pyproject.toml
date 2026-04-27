@@ -1,11 +1,27 @@
 [project]
 name = "iv-woe-filter"
-version = "0.2.0"
+version = "1.0.0"
 description = "Financial-grade IV/WOE feature selection and encoding for credit risk modeling"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.9"
+license = "MIT"
 authors = [
     {name = "Dilshod A'zamjonov", email = "dilshod1526@gmail.com"}
+]
+keywords = ["credit-risk", "scorecard", "woe", "iv", "psi", "scikit-learn"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering",
 ]
 dependencies = [
     "pandas",
@@ -13,6 +29,11 @@ dependencies = [
     "scikit-learn",
     "joblib",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dilshodazamjonov/iv-woe-filter"
+Repository = "https://github.com/dilshodazamjonov/iv-woe-filter"
+Issues = "https://github.com/dilshodazamjonov/iv-woe-filter/issues"
 
 [project.optional-dependencies]
 test = [

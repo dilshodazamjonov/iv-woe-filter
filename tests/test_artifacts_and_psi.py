@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 
 import pandas as pd
 
@@ -40,7 +41,7 @@ def test_artifact_content_includes_expected_columns(sample_data, output_dir):
     iv_df = pd.read_csv(os.path.join(output_dir, "iv_summary.csv"))
 
     assert {"feature", "bin_range", "woe", "iv_bin"}.issubset(stats_df.columns)
-    assert {"feature", "type", "IV", "Gini", "leakage_flag"}.issubset(audit_df.columns)
+    assert {"feature", "type", "binning_method", "IV", "Gini", "leakage_flag"}.issubset(audit_df.columns)
     assert {"IV", "Gini"}.issubset(iv_df.columns)
 
 
@@ -60,14 +61,19 @@ def test_calculate_psi_returns_ranked_report(sample_data):
     assert psi_report.loc[psi_report["feature"] == "num_feat", "PSI"].iat[0] > 0
 
 
-def test_calculate_psi_skips_missing_columns_in_new_data(sample_data):
+def test_calculate_psi_marks_missing_columns_in_new_data(sample_data, caplog):
     X, y = sample_data
     transformer = IVWOEFilter(min_iv=0.0, min_gini=0.0, verbose=False)
     transformer.fit(X, y)
 
-    psi_report = transformer.calculate_psi(X[["num_feat"]], save=False)
+    with caplog.at_level(logging.WARNING):
+        psi_report = transformer.calculate_psi(X[["num_feat"]], save=False)
 
-    assert list(psi_report["feature"]) == ["num_feat"]
+    assert "missing from PSI input" in caplog.text
+    assert "num_feat" in psi_report["feature"].values
+    missing_rows = psi_report[psi_report["status"] == "Missing in Input"]
+    assert not missing_rows.empty
+    assert missing_rows["PSI"].isna().all()
 
 
 def test_calculate_psi_writes_stability_report(sample_data, output_dir):
