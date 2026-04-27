@@ -14,7 +14,7 @@ Scikit-learn compatible IV/WOE binning, feature selection, and PSI auditing for 
 
 In credit risk modeling, WOE encoding and IV-based feature selection are standard practice. In most teams, they are also a source of recurring problems: hand-rolled binning scripts that differ between analysts, WOE maps that are never persisted, transformations applied inconsistently between training and scoring, and no formal record of how features were selected or why.
 
-The consequences are familiar - model validation findings, scorecard drift, leakage that surfaces only in production, and ![1777289000561](image/README/1777289000561.png)eview cycles that require reconstructing preprocessing decisions from memory or scattered notebooks.
+The consequences are familiar - model validation findings, scorecard drift, leakage that surfaces only in production, cycles that require reconstructing preprocessing decisions from memory or scattered notebooks.
 
 `iv-woe-filter` addresses this directly. It wraps the full IV/WOE preprocessing pipeline - binning, merging, special-code isolation, WOE encoding, IV-based feature selection, Gini-based rank-ordering validation, leakage risk flagging, monotonicity auditing, and population stability measurement - into a single, sklearn-compatible transformer. Every fit is reproducible, every decision is logged, and every artifact needed for internal governance review is written automatically.
 
