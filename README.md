@@ -2,7 +2,7 @@
 
 Scikit-learn compatible IV/WOE binning, feature selection, and PSI auditing for credit risk modeling.
 
-[![PyPI version](https://img.shields.io/pypi/v/iv-woe-filter?style=flat-square)](https://pypi.org/project/iv-woe-filter/)
+[![PyPI version](https://img.shields.io/pypi/v/iv-woe-filter?style=flat-square&cacheSeconds=60)](https://pypi.org/project/iv-woe-filter/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/dilshodazamjonov/iv-woe-filter/ci.yaml?style=flat-square&label=CI)](https://github.com/dilshodazamjonov/iv-woe-filter/actions)
