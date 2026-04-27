@@ -78,11 +78,11 @@ jobs:
       - name: Install built wheel
         run: |
           uv venv smoke-wheel
-          smoke-wheel/bin/python -m pip install dist/*.whl
+          uv pip install --python smoke-wheel/bin/python dist/*.whl
           smoke-wheel/bin/python -c "from iv_woe_filter import IVWOEFilter; print(IVWOEFilter.__name__)"
 
       - name: Install built sdist
         run: |
           uv venv smoke-sdist
-          smoke-sdist/bin/python -m pip install dist/*.tar.gz
+          uv pip install --python smoke-sdist/bin/python dist/*.tar.gz
           smoke-sdist/bin/python -c "from iv_woe_filter import IVWOEFilter; print(IVWOEFilter.__name__)"
