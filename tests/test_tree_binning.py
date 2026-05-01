@@ -200,6 +200,7 @@ def test_chi_merge_logs_feature_completion(caplog):
 def test_tree_parameters_are_sklearn_visible():
     transformer = IVWOEFilter(
         binning_method="tree",
+        parallel_backend="threads",
         random_state=13,
         tree_criterion="entropy",
         tree_max_depth=2,
@@ -210,6 +211,7 @@ def test_tree_parameters_are_sklearn_visible():
     params = transformer.get_params()
 
     assert params["binning_method"] == "tree"
+    assert params["parallel_backend"] == "threads"
     assert params["random_state"] == 13
     assert params["tree_criterion"] == "entropy"
     assert params["tree_max_depth"] == 2

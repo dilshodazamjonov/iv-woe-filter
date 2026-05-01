@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import os
 import logging
+import os
 
-import matplotlib
 import pandas as pd
 
 from iv_woe_filter import IVWOEFilter
-
-matplotlib.use("Agg")
 
 
 def test_fit_writes_expected_artifact_files(sample_data, output_dir):
@@ -44,7 +41,9 @@ def test_artifact_content_includes_expected_columns(sample_data, output_dir):
     iv_df = pd.read_csv(os.path.join(output_dir, "iv_summary.csv"))
 
     assert {"feature", "bin_range", "woe", "iv_bin"}.issubset(stats_df.columns)
-    assert {"feature", "type", "binning_method", "IV", "Gini", "leakage_flag"}.issubset(audit_df.columns)
+    assert {"feature", "type", "binning_method", "IV", "Gini", "leakage_flag"}.issubset(
+        audit_df.columns
+    )
     assert {"IV", "Gini"}.issubset(iv_df.columns)
 
 

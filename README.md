@@ -157,7 +157,7 @@ pipe.fit(X_train, y_train)
 | Capability | Description |
 |---|---|
 | IV-based feature filtering | Features that fall below a configurable IV threshold are excluded at transform time. The threshold and all IV scores are recorded. |
-| Gini-based rank-ordering validation | Gini is derived from ROC-AUC using `2 * max(AUC, 1 - AUC) - 1` and used as a secondary selection criterion alongside IV. Features below the `min_gini` threshold are excluded, ensuring retained features demonstrate meaningful predictive separation. |
+| Gini-based rank-ordering validation | Gini is derived from ROC-AUC using `2 * max(AUC, 1 - AUC) - 1` and is computed on the fitted WOE representation for every feature. Features below the `min_gini` threshold are excluded, ensuring the retained encoded features demonstrate meaningful predictive separation. |
 | WOE encoding | Raw feature values are replaced with Weight of Evidence scores derived from the training distribution. Encoding is applied consistently via the stored WOE map at transform time. |
 | Configurable numeric binning | Numeric features use equal-frequency quantile bins by default, with supervised ChiMerge and tree-based bins available through `binning_method`. |
 | Categorical support | String and low-cardinality integer columns are handled natively; no manual encoding is required before fitting. |
@@ -166,7 +166,7 @@ pipe.fit(X_train, y_train)
 | Target proxy signal flagging | Features with IV above a configurable upper threshold are flagged as potential target proxy signals and recorded in the audit output for modeler review. |
 | Monotonicity auditing | The WOE trend direction is checked across ordered bins for every numeric feature. Non-monotonic features are flagged in the audit output. |
 | Population Stability Index (PSI) | `calculate_psi()` compares training-time bin distributions against a new dataset to detect population drift, producing a per-feature stability report. |
-| Parallel processing | All per-feature operations run in parallel via `joblib`. |
+| Parallel processing | All per-feature operations run in parallel via `joblib`, with backend selection controlled by `parallel_backend`. |
 | Audit artifact generation | Structured CSV files are written at the end of every `fit()` and `calculate_psi()` call, covering IV scores, Gini coefficients, bin-level statistics, per-feature governance diagnostics, and population stability. |
 
 ---
@@ -206,13 +206,13 @@ IV = sum_i ((%Goods_i - %Bads_i) * WOE_i)
 
 In plain terms: IV measures how well a feature's bins separate defaults from non-defaults. A higher IV means stronger separation. After fitting, all IV scores are stored in `iv_table_` sorted in descending order.
 
-Gini measures how well the raw feature ranks good versus bad observations, regardless of how it is binned. It is derived from the feature-level ROC-AUC and expressed on a 0-1 scale.
+Gini measures how well the fitted feature representation ranks good versus bad observations. In this package, that representation is the stored WOE mapping applied to the learned bins for both numeric and categorical features. This keeps `min_gini` comparable across feature types and expresses separation in the same transformed space the model will actually consume. It is derived from the feature-level ROC-AUC and expressed on a 0-1 scale.
 
 ```text
 Gini = 2 * max(AUC, 1 - AUC) - 1
 ```
 
-Gini and IV are complementary. IV reflects the aggregate separation signal as captured by the chosen bin structure; Gini evaluates the underlying rank-ordering quality of the raw feature, independent of any binning decisions. Both are recorded in `iv_table_` and `feature_audit.csv`.
+Gini and IV are complementary. IV reflects the aggregate separation signal captured by the chosen bin structure, while Gini evaluates the discriminatory power of the fitted WOE representation. Both are recorded in `iv_table_` and `feature_audit.csv`.
 
 ### 4. Feature Selection
 
@@ -251,7 +251,7 @@ If `output_dir` is set, CSV files are written automatically at the end of `fit()
 | `n_bins` | `int` | `10` | Maximum number of bins for numeric features |
 | `binning_method` | `str` | `"quantile"` | Numeric binning strategy. Supported values are `"quantile"`, `"chi_merge"`, and `"tree"` |
 | `min_iv` | `float` | `0.02` | Minimum IV to retain a feature at transform time |
-| `min_gini` | `float` | `0.05` | Minimum Gini coefficient to retain a feature at transform time |
+| `min_gini` | `float` | `0.05` | Minimum Gini coefficient to retain a feature at transform time, computed on the fitted WOE representation |
 | `max_iv_for_leakage` | `float` | `0.8` | Features with IV above this value are flagged as potential target proxy signals |
 | `min_bin_pct` | `float or None` | `0.05` | Minimum bin population share (0-1); bins below this are merged |
 | `special_codes` | `dict or None` | `{}` | Per-feature lists of sentinel values to isolate before binning |
@@ -264,6 +264,7 @@ If `output_dir` is set, CSV files are written automatically at the end of `fit()
 | `tree_min_samples_leaf` | `int, float, or None` | `None` | Minimum samples per tree leaf. If `None`, `min_bin_pct` is used when available |
 | `tree_min_samples_split` | `int or float` | `2` | Minimum samples required to split an internal tree node |
 | `n_jobs` | `int` | `-1` | Number of parallel workers passed to `joblib` (`-1` = all cores) |
+| `parallel_backend` | `str` | `"auto"` | Joblib backend preference. `"auto"` uses threads for supervised numeric binning and processes otherwise; `"threads"` and `"processes"` force a specific backend |
 | `output_dir` | `str or None` | `None` | Directory for audit CSV artifacts; no files are written if `None` |
 | `verbose` | `bool` | `True` | If `True`, progress is logged via the standard `logging` module |
 
@@ -276,8 +277,8 @@ These attributes are available after calling `fit()`.
 | `iv_table_` | `pd.DataFrame` | IV and Gini scores for all processed features, sorted descending by IV |
 | `selected_features_` | `list[str]` | Features that met both the `min_iv` and `min_gini` thresholds |
 | `woe_maps_` | `dict[str, dict]` | Bin-to-WOE mapping per feature, applied at transform time |
-| `binning_` | `dict[str, Any]` | Fitted bin configuration per feature, including the learned `binning_method` and numeric bin edges or categorical mappings |
-| `monotonicity_report_` | `dict[str, Any]` | Monotonicity check results per feature, including direction |
+| `binning_` | `dict[str, NumericBinConfig \| CategoricalBinConfig]` | Fitted bin configuration per feature, including the learned `binning_method`, numeric bin edges or categorical mappings, and any persisted post-fit merge map |
+| `monotonicity_report_` | `dict[str, MonotonicityResult]` | Monotonicity check results per feature, including `is_monotonic` and `direction` |
 | `leakage_flags_` | `dict[str, bool]` | `True` for each feature whose IV exceeded `max_iv_for_leakage` |
 | `feature_types_` | `dict[str, str]` | `"numeric"` or `"categorical"` per feature |
 | `reference_distributions_` | `dict[str, pd.Series]` | Training-time bin distributions stored per feature; used as the expected baseline when `calculate_psi()` is called |
@@ -390,6 +391,8 @@ IVWOEFilter(n_jobs=-1)   # all logical cores
 IVWOEFilter(n_jobs=4)    # fixed worker count
 IVWOEFilter(n_jobs=1)    # single-threaded (useful for debugging)
 ```
+
+By default, `parallel_backend="auto"` uses thread-based workers for supervised numeric binning (`chi_merge` and `tree`) and process-based workers otherwise. This keeps the heavier supervised paths more stable on Windows while preserving the default process backend for the simpler quantile path. If you need to force one strategy, pass `parallel_backend="threads"` or `parallel_backend="processes"`.
 
 ### Sklearn Compatibility
 

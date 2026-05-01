@@ -24,6 +24,16 @@ def test_target_validation_rejects_invalid_targets(y, message):
     with pytest.raises(ValueError, match=message):
         transformer.fit(X, y)
 
+
+def test_target_validation_accepts_numeric_like_string_labels():
+    X = pd.DataFrame({"feature": [1, 2, 3, 4]})
+    y = pd.Series(["0", "1", "0", "1"])
+    transformer = IVWOEFilter(min_iv=0.0, min_gini=0.0, verbose=False)
+
+    transformer.fit(X, y)
+
+    assert "feature" in transformer.iv_table_.index
+
 def test_special_codes_create_dedicated_negative_bin(sample_data):
     X, y = sample_data
     transformer = IVWOEFilter(
@@ -112,6 +122,7 @@ def test_gini_column_is_present_and_bounded(sample_data):
         ({"tree_min_samples_split": 1}, "tree_min_samples_split"),
         ({"tree_min_samples_leaf": 0.0}, "tree_min_samples_leaf"),
         ({"n_jobs": 0}, "n_jobs"),
+        ({"parallel_backend": "invalid"}, "parallel_backend"),
     ],
 )
 def test_parameter_validation_rejects_invalid_configuration(sample_data, kwargs, message):

@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 
 from iv_woe_filter import IVWOEFilter
+from iv_woe_filter.binning import apply_bins, remap_bin_ids
+from iv_woe_filter.metrics import calculate_feature_gini
 
 
 def test_categorical_small_bins_are_merged_into_combined_labels():
@@ -121,3 +123,26 @@ def test_numeric_merged_bin_label_reflects_combined_range():
 
     stats = transformer._per_feature_stats["score"]
     assert stats.loc[merged_bin, "bin_range"] == expected_label
+
+
+def test_numeric_gini_uses_fitted_woe_representation():
+    x = np.linspace(0, 100, 120)
+    y = (x >= 50).astype(int)
+    X = pd.DataFrame({"score": x})
+
+    transformer = IVWOEFilter(
+        n_bins=4,
+        min_bin_pct=None,
+        min_iv=0.0,
+        min_gini=0.0,
+        n_jobs=1,
+        verbose=False,
+    )
+    transformer.fit(X, y)
+
+    config = transformer.binning_["score"]
+    bin_ids = apply_bins(X["score"], config)
+    bin_ids = remap_bin_ids(bin_ids, config)
+    expected_gini = calculate_feature_gini(bin_ids, transformer.woe_maps_["score"], y)
+
+    assert np.isclose(transformer.iv_table_.loc["score", "Gini"], expected_gini)

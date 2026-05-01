@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
-
-logger = logging.getLogger(__name__)
 
 
 def calculate_gini(y_true: Any, y_score: Any) -> float:
@@ -46,11 +43,11 @@ def calculate_gini(y_true: Any, y_score: Any) -> float:
 
 
 def calculate_feature_gini(
-    bin_ids: np.ndarray, 
-    woe_map: dict[int, float], 
+    bin_ids: np.ndarray,
+    woe_map: dict[int, float],
     y: np.ndarray
 ) -> float:
-    """Calculate Gini for a single feature based on its WOE transformation.
+    """Calculate Gini for a fitted feature from its WOE-transformed bin ids.
 
     Parameters
     ----------
@@ -64,7 +61,7 @@ def calculate_feature_gini(
     Returns
     -------
     float
-        Feature-level Gini coefficient.
+        Feature-level Gini coefficient for the fitted representation.
     """
     y_score = pd.Series(bin_ids).map(woe_map).fillna(0.0).values
     return calculate_gini(y, y_score)
