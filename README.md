@@ -3,7 +3,7 @@
 Scikit-learn compatible IV/WOE binning, feature selection, and PSI auditing for credit risk modeling.
 
 [![PyPI version](https://img.shields.io/pypi/v/iv-woe-filter?style=flat-square&cacheSeconds=60)](https://pypi.org/project/iv-woe-filter/)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/dilshodazamjonov/iv-woe-filter/ci.yaml?style=flat-square&label=CI)](https://github.com/dilshodazamjonov/iv-woe-filter/actions)
 [![scikit-learn compatible](https://img.shields.io/badge/sklearn-compatible-orange?style=flat-square)](https://scikit-learn.org/)
@@ -107,9 +107,12 @@ X_test["age_at_app"] += 2.0
 # 4. Audit feature stability (PSI)
 psi_report = filter_.calculate_psi(X_test, save=True)
 print(psi_report)                 # PSI score and shift status
+
+# 5. Save per-feature audit plots
+filter_.save_feature_plot(output_dir="audit/plots/", feature="all")
 ```
 
-For the default unsupervised path, omit `binning_method` and the tree-specific parameters. `IVWOEFilter()` uses quantile binning for numeric features unless you explicitly switch to `binning_method="tree"`.
+For the default unsupervised path, omit `binning_method` and the tree-specific parameters. `IVWOEFilter()` uses quantile binning for numeric features unless you explicitly switch to a supervised alternative such as `binning_method="chi_merge"` or `binning_method="tree"`.
 
 ### Pipeline Usage
 
@@ -156,7 +159,7 @@ pipe.fit(X_train, y_train)
 | IV-based feature filtering | Features that fall below a configurable IV threshold are excluded at transform time. The threshold and all IV scores are recorded. |
 | Gini-based rank-ordering validation | Gini is derived from ROC-AUC using `2 * max(AUC, 1 - AUC) - 1` and used as a secondary selection criterion alongside IV. Features below the `min_gini` threshold are excluded, ensuring retained features demonstrate meaningful predictive separation. |
 | WOE encoding | Raw feature values are replaced with Weight of Evidence scores derived from the training distribution. Encoding is applied consistently via the stored WOE map at transform time. |
-| Configurable numeric binning | Numeric features use equal-frequency quantile bins by default, with supervised tree-based bins available through `binning_method="tree"`. |
+| Configurable numeric binning | Numeric features use equal-frequency quantile bins by default, with supervised ChiMerge and tree-based bins available through `binning_method`. |
 | Categorical support | String and low-cardinality integer columns are handled natively; no manual encoding is required before fitting. |
 | Small bin merging | Bins below a configurable population share are merged with their nearest neighbour, eliminating zero-event and statistically unstable bins before WOE computation. |
 | Special codes isolation | Sentinel values (e.g. `-99`, `9999`) are removed from the continuous distribution before binning and assigned dedicated WOE bins, preserving their signal without distorting numeric boundaries. |
@@ -177,7 +180,7 @@ raw features -> special code isolation -> numeric binning -> small bin merging
 
 ### 1. Binning
 
-When `fit()` is called, each feature is binned independently. Numeric features are assigned to equal-frequency quantile bins by default, ensuring each bin has a comparable share of the training population. If `binning_method="tree"` is selected, numeric boundaries are learned from the binary target using a decision tree constrained by `n_bins` and the optional tree parameters, then passed through the same WOE/IV workflow. Categorical features are binned by value. Before binning, any values listed in `special_codes` for that feature are extracted and assigned their own dedicated bin.
+When `fit()` is called, each feature is binned independently. Numeric features are assigned to equal-frequency quantile bins by default, ensuring each bin has a comparable share of the training population. If `binning_method="chi_merge"` is selected, adjacent ordered value groups are merged using a binary-target chi-square test until the requested bin budget is reached. If `binning_method="tree"` is selected, numeric boundaries are learned from the binary target using a decision tree constrained by `n_bins` and the optional tree parameters, then passed through the same WOE/IV workflow. Categorical features are binned by value. Before binning, any values listed in `special_codes` for that feature are extracted and assigned their own dedicated bin.
 
 Once initial bins are created, any bin whose population share falls below `min_bin_pct` is merged with its nearest neighbour. This step prevents unstable WOE estimates and zero-event bins, both of which introduce noise into IV calculations and can cause calibration issues downstream.
 
@@ -246,7 +249,7 @@ If `output_dir` is set, CSV files are written automatically at the end of `fit()
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `n_bins` | `int` | `10` | Maximum number of bins for numeric features |
-| `binning_method` | `str` | `"quantile"` | Numeric binning strategy. Supported values are `"quantile"` and `"tree"` |
+| `binning_method` | `str` | `"quantile"` | Numeric binning strategy. Supported values are `"quantile"`, `"chi_merge"`, and `"tree"` |
 | `min_iv` | `float` | `0.02` | Minimum IV to retain a feature at transform time |
 | `min_gini` | `float` | `0.05` | Minimum Gini coefficient to retain a feature at transform time |
 | `max_iv_for_leakage` | `float` | `0.8` | Features with IV above this value are flagged as potential target proxy signals |
@@ -291,6 +294,10 @@ audit_outputs/
     bin_stats.csv
     feature_audit.csv
     stability_report.csv
+    plots/
+        bureau_score.png
+        months_employed.png
+        ...
 ```
 
 ### `iv_summary.csv`
@@ -308,6 +315,12 @@ One row per feature. Contains feature type, binning method, IV, Gini, monotonici
 ### `stability_report.csv`
 
 One row per feature. Contains the PSI score computed against the dataset passed to `calculate_psi()`, along with a shift status derived from `psi_thresholds` (`Stable`, `Minor Shift`, or `Significant Shift`). This file is intended for periodic out-of-time monitoring and provides a documented record of population drift assessments across model deployment cycles.
+
+### Feature Plots
+
+`IVWOEFilter` also provides built-in plotting methods through `plot_feature_audit()` and `save_feature_plot()`. Each feature plot uses bin labels on the x-axis, bad-rate bars on the left y-axis, and a WOE line on the right y-axis. Numeric bin ranges are rounded for readability, and each bar is annotated with total count, good count, and bad count so the visual can be used directly in audit discussions.
+
+Use `save_feature_plot(feature="all")` to save every fitted feature, or pass a specific feature name to save just one plot.
 
 ---
 
@@ -330,6 +343,19 @@ IVWOEFilter(
 `n_bins` is passed as the maximum number of tree leaves. If `tree_min_samples_leaf` is not set, `min_bin_pct` is used as the leaf-size guardrail, so very small leaves are discouraged before WOE is calculated.
 
 In practice, `tree` is useful when you want the binning stage to pick target-aware cut points instead of equal-frequency intervals. The tradeoff is that tree-based thresholds are more sample-dependent than quantile bins, so they should be reviewed carefully when stability matters.
+
+### ChiMerge Numeric Binning
+
+For numeric features, `binning_method="chi_merge"` learns ordered bins by repeatedly merging the adjacent pair with the smallest chi-square separation in the binary target. This mode is numeric-only and supervised: it uses the target during fit to find risk-homogeneous intervals, then reuses the learned cut points in the same WOE/IV workflow as the quantile and tree paths.
+
+```python
+IVWOEFilter(
+    binning_method="chi_merge",
+    n_bins=6,
+)
+```
+
+`n_bins` is treated as the maximum number of final numeric intervals. On moderate-cardinality features, ChiMerge starts from one bin per distinct value. On very high-cardinality features, the implementation first compresses the distribution into ordered quantile seed bins before merging, which keeps runtime and memory usage practical on larger datasets. The tradeoff is that its learned thresholds are still sample-dependent and should be reviewed with the same stability discipline as any other supervised binning method.
 
 ### Special Codes Handling
 
@@ -389,7 +415,7 @@ The following are known constraints of the current implementation. They are docu
 
 **IV is sensitive to binning strategy.** Information Value is not a fixed property of a feature - it depends on how that feature is binned. Different values of `binning_method`, `n_bins`, or `min_bin_pct` will produce different IV scores for the same feature on the same dataset. IV scores should not be compared across fits that used different binning configurations.
 
-**Tree-based thresholds are sample-dependent.** When `binning_method="tree"` is used, learned split points come from the observed relationship between a feature and the target in the fit sample. On smaller or noisier datasets, those thresholds can be less stable than quantile bins and should be reviewed with PSI, monotonicity, and holdout performance in mind.
+**Supervised thresholds are sample-dependent.** When `binning_method="tree"` or `binning_method="chi_merge"` is used, learned split points come from the observed relationship between a feature and the target in the fit sample. On smaller or noisier datasets, those thresholds can be less stable than quantile bins and should be reviewed with PSI, monotonicity, and holdout performance in mind.
 
 **The target proxy signal flag is a heuristic, not a detection mechanism.** `max_iv_for_leakage` identifies features with unusually high IV relative to a configurable threshold. A high IV score is a signal worth investigating, not a confirmation of leakage. Legitimate features can have high IV; some forms of leakage produce moderate IV. The flag is an input to human judgment, not a substitute for it.
 
@@ -450,7 +476,7 @@ iv-woe-filter/
         iv_woe_filter/
             __init__.py
             iv_woe_filter.py     # IVWOEFilter transformer
-            binning.py           # Quantile, tree, and categorical binning logic
+            binning.py           # Quantile, ChiMerge, tree, and categorical binning logic
             woe.py               # Vectorized WOE / IV computation and monotonicity checks
             metrics.py           # Gini and PSI calculations
     tests/

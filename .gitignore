@@ -20,3 +20,4 @@ dist/
 output_dir/
 *.csv
 main.py
+*.png

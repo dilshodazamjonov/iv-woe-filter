@@ -11,10 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Calculation Logic
-# ---------------------------------------------------------------------------
-
 def safe_div(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
     """Safely divide two arrays, returning 0 where the denominator is 0.
 

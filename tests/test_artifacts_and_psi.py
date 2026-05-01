@@ -3,9 +3,12 @@ from __future__ import annotations
 import os
 import logging
 
+import matplotlib
 import pandas as pd
 
 from iv_woe_filter import IVWOEFilter
+
+matplotlib.use("Agg")
 
 
 def test_fit_writes_expected_artifact_files(sample_data, output_dir):
@@ -92,3 +95,60 @@ def test_calculate_psi_writes_stability_report(sample_data, output_dir):
     assert os.path.exists(report_path)
     stability_df = pd.read_csv(report_path)
     assert {"feature", "PSI", "status"}.issubset(stability_df.columns)
+
+
+def test_save_feature_plot_writes_png_files_for_all_features(sample_data, output_dir):
+    X, y = sample_data
+    transformer = IVWOEFilter(
+        output_dir=output_dir,
+        min_iv=0.0,
+        min_gini=0.0,
+        n_jobs=1,
+        verbose=False,
+    )
+    transformer.fit(X, y)
+
+    plot_dir = os.path.join(output_dir, "plots")
+    saved_paths = transformer.save_feature_plot(plot_dir, feature="all")
+
+    assert len(saved_paths) == len(transformer.iv_table_.index)
+    assert all(path.endswith(".png") for path in saved_paths)
+    assert all(os.path.exists(path) for path in saved_paths)
+
+
+def test_plot_feature_audit_rounds_numeric_bin_labels(sample_data):
+    X, y = sample_data
+    transformer = IVWOEFilter(
+        min_iv=0.0,
+        min_gini=0.0,
+        n_bins=5,
+        n_jobs=1,
+        verbose=False,
+    )
+    transformer.fit(X, y)
+
+    fig, (ax_left, _) = transformer.plot_feature_audit("num_feat", round_digits=1)
+    labels = [tick.get_text() for tick in ax_left.get_xticklabels()]
+    fig.clear()
+
+    assert labels
+    assert any(label.startswith("[") for label in labels)
+    assert all(".00" not in label for label in labels if label.startswith("["))
+
+
+def test_save_feature_plot_writes_single_requested_feature(sample_data, output_dir):
+    X, y = sample_data
+    transformer = IVWOEFilter(
+        output_dir=output_dir,
+        min_iv=0.0,
+        min_gini=0.0,
+        n_jobs=1,
+        verbose=False,
+    )
+    transformer.fit(X, y)
+
+    plot_dir = os.path.join(output_dir, "single-plot")
+    saved_path = transformer.save_feature_plot(plot_dir, feature="num_feat")
+
+    assert saved_path.endswith("num_feat.png")
+    assert os.path.exists(saved_path)

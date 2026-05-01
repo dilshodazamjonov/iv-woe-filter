@@ -1,4 +1,45 @@
-"""Binning logic for numeric and categorical feature transformation."""
+"""
+Binning logic for numeric and categorical feature transformation.
+
+Binning Methods
+---------------
+
+1. Quantile Binning
+--------------------
+Divides the observed numeric distribution into bins with roughly equal
+population counts.
+
+Key features:
+    - Robust against outliers.
+    - Useful as a simple unsupervised baseline.
+
+2. Tree-Based Binning
+---------------------
+A supervised binning technique that trains a
+`sklearn.tree.DecisionTreeClassifier` on a single feature and reuses its
+learned split points as numeric bin edges.
+
+Key features:
+    - Learns target-aware thresholds.
+    - Supports tree depth and minimum leaf-size constraints.
+
+3. ChiMerge Binning
+---------------------
+Starts from ordered seed bins and repeatedly merges the adjacent pair with
+the smallest chi-square separation in the binary target until at most
+`n_bins` intervals remain. For very high-cardinality numeric features, the
+implementation first compresses the distribution into quantile-based seed
+bins to keep runtime and memory usage under control.
+
+Algorithm:
+    - Each distinct value starts in its own bin when cardinality is moderate.
+    - Very high-cardinality features are first compressed into ordered seed bins.
+    - Calculate the chi-square score for each adjacent bin pair.
+    - Merge the most statistically similar pair.
+    - Repeat until at most `n_bins` intervals remain.
+    - Return the numeric edges that define the final bins.
+
+"""
 
 from __future__ import annotations
 
@@ -12,7 +53,9 @@ from sklearn.tree import DecisionTreeClassifier
 logger = logging.getLogger(__name__)
 
 
-SUPPORTED_BINNING_METHODS = {"quantile", "tree"}
+SUPPORTED_BINNING_METHODS = {"chi_merge", "quantile", "tree"}
+CHI_MERGE_MIN_PREBINS = 100
+CHI_MERGE_PREBIN_MULTIPLIER = 20
 
 
 def _finalize_numeric_bins(bins: list[float] | np.ndarray) -> np.ndarray:
@@ -29,6 +72,7 @@ def _finalize_numeric_bins(bins: list[float] | np.ndarray) -> np.ndarray:
 
 
 def _fit_quantile_bins(clean_series: pd.Series, n_bins: int) -> np.ndarray:
+    """Fit unsupervised numeric bins using equal-frequency quantiles."""
     try:
         _, bins = pd.qcut(clean_series, q=n_bins, duplicates="drop", retbins=True)
     except (ValueError, IndexError):
@@ -38,6 +82,141 @@ def _fit_quantile_bins(clean_series: pd.Series, n_bins: int) -> np.ndarray:
         )
 
     return _finalize_numeric_bins(bins)
+
+
+def _build_chi_merge_seed_bins(
+    x: np.ndarray,
+    y_clean: np.ndarray,
+    n_bins: int,
+) -> tuple[list[dict[str, float]], dict[str, Any]]:
+    """Build ordered ChiMerge seed bins, pre-binning when cardinality is very high."""
+    unique_value_count = int(np.unique(x).size)
+    max_prebins = max(CHI_MERGE_MIN_PREBINS, n_bins * CHI_MERGE_PREBIN_MULTIPLIER)
+
+    metadata = {
+        "chi_merge_unique_value_count": unique_value_count,
+        "chi_merge_max_prebins": max_prebins,
+        "chi_merge_used_prebinning": unique_value_count > max_prebins,
+    }
+
+    if not metadata["chi_merge_used_prebinning"]:
+        grouped = (
+            pd.DataFrame({"value": x, "target": y_clean})
+            .groupby("value", sort=True)["target"]
+            .agg(count="size", bad="sum")
+            .reset_index()
+        )
+        grouped["lower"] = grouped["value"]
+        grouped["upper"] = grouped["value"]
+    else:
+        seed_edges = _fit_quantile_bins(pd.Series(x), max_prebins)
+        seed_ids = pd.cut(x, bins=seed_edges, labels=False, include_lowest=True)
+        grouped = (
+            pd.DataFrame({"value": x, "target": y_clean, "seed_id": seed_ids})
+            .groupby("seed_id", sort=True)
+            .agg(lower=("value", "min"), upper=("value", "max"), count=("target", "size"), bad=("target", "sum"))
+            .reset_index(drop=True)
+        )
+
+    grouped["good"] = grouped["count"] - grouped["bad"]
+    metadata["chi_merge_seed_bin_count"] = int(len(grouped))
+
+    intervals = [
+        {
+            "lower": float(row.lower),
+            "upper": float(row.upper),
+            "good": float(row.good),
+            "bad": float(row.bad),
+        }
+        for row in grouped.itertuples(index=False)
+    ]
+    return intervals, metadata
+
+
+def _calculate_adjacent_chi_square(
+    left_good: float,
+    left_bad: float,
+    right_good: float,
+    right_bad: float,
+) -> float:
+    """Return the chi-square statistic for two adjacent binary-target bins."""
+
+    # saving into observed table of 2x2 
+    observed = np.array(
+        [
+            [left_good, left_bad], 
+            [right_good, right_bad]
+        ],
+        dtype=float,
+    )
+    # summing all the observations in left, right and total
+    row_totals = observed.sum(axis=1, keepdims=True)
+    col_totals = observed.sum(axis=0, keepdims=True)
+    total = observed.sum()
+
+    if total == 0:
+        return 0.0
+
+    # using matrix multiplication for better performance    
+    expected = row_totals @ col_totals / total
+    chi_square = np.divide(
+        (observed - expected) ** 2,
+        expected,
+        out=np.zeros_like(observed, dtype=float),
+        where=(expected > 0),
+    )
+    return float(chi_square.sum())
+
+
+def _fit_chi_merge_binning(
+    clean_series: pd.Series,
+    y: np.ndarray,
+    n_bins: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit supervised numeric bins by merging adjacent low-separation intervals."""
+    valid_mask = clean_series.notna().to_numpy()
+    x = clean_series[valid_mask].to_numpy(dtype=float)
+    y_clean = np.asarray(y)[valid_mask]
+
+    # checking if the binning if possible if not return [-inf, inf]
+    if len(x) == 0 or len(np.unique(x)) <= 1 or len(np.unique(y_clean)) < 2 or n_bins <= 1:
+        return np.array([-np.inf, np.inf]), {
+            "chi_merge_unique_value_count": int(np.unique(x).size),
+            "chi_merge_max_prebins": max(CHI_MERGE_MIN_PREBINS, n_bins * CHI_MERGE_PREBIN_MULTIPLIER),
+            "chi_merge_used_prebinning": False,
+            "chi_merge_seed_bin_count": int(np.unique(x).size),
+            "chi_merge_final_bin_count": 1,
+        }
+
+    intervals, metadata = _build_chi_merge_seed_bins(x, y_clean, n_bins)
+
+    while len(intervals) > n_bins:
+        chi_values = [
+            _calculate_adjacent_chi_square(
+                intervals[idx]["good"],
+                intervals[idx]["bad"],
+                intervals[idx + 1]["good"],
+                intervals[idx + 1]["bad"],
+            )
+            for idx in range(len(intervals) - 1)
+        ]
+        merge_idx = int(np.argmin(chi_values))
+        intervals[merge_idx : merge_idx + 2] = [
+            {
+                "lower": intervals[merge_idx]["lower"],
+                "upper": intervals[merge_idx + 1]["upper"],
+                "good": intervals[merge_idx]["good"] + intervals[merge_idx + 1]["good"],
+                "bad": intervals[merge_idx]["bad"] + intervals[merge_idx + 1]["bad"],
+            }
+        ]
+
+    metadata["chi_merge_final_bin_count"] = len(intervals)
+
+    boundaries = [-np.inf]
+    for left_interval, right_interval in zip(intervals, intervals[1:]):
+        boundaries.append((left_interval["upper"] + right_interval["lower"]) / 2.0)
+    boundaries.append(np.inf)
+    return np.asarray(boundaries, dtype=float), metadata
 
 
 def _fit_tree_bins(
@@ -51,6 +230,7 @@ def _fit_tree_bins(
     tree_min_samples_leaf: int | float | None,
     tree_min_samples_split: int | float,
 ) -> np.ndarray:
+    """Fit supervised numeric bins from decision-tree split thresholds."""
     valid_mask = clean_series.notna().to_numpy()
     x = clean_series[valid_mask].to_numpy(dtype=float).reshape(-1, 1)
     y_clean = np.asarray(y)[valid_mask]
@@ -81,6 +261,19 @@ def _fit_tree_bins(
     return np.concatenate(([-np.inf], np.sort(np.unique(thresholds)), [np.inf]))
 
 
+def remap_bin_ids(bin_ids: np.ndarray, config: dict[str, Any]) -> np.ndarray:
+    """Apply a fitted post-binning merge map when one exists."""
+    bin_id_map = config.get("bin_id_map")
+    if not bin_id_map:
+        return bin_ids
+
+    return np.fromiter(
+        (int(bin_id_map.get(int(bin_id), int(bin_id))) for bin_id in bin_ids),
+        dtype=int,
+        count=len(bin_ids),
+    )
+
+
 def fit_numeric_bins(
     series: pd.Series,
     n_bins: int,
@@ -105,10 +298,10 @@ def fit_numeric_bins(
         Target number of bins for the numeric split.
     special_codes : list of (int or float) or None
         Values to be treated as independent bins (e.g., error codes, missing flags).
-    binning_method : {"quantile", "tree"}, default="quantile"
+    binning_method : {"quantile", "chi_merge", "tree"}, default="quantile"
         Numeric binning strategy.
     y : np.ndarray or None
-        Binary target array. Required when `binning_method="tree"`.
+        Binary target array. Required when `binning_method` is `"tree"` or `"chi_merge"`.
 
     Returns
     -------
@@ -131,6 +324,12 @@ def fit_numeric_bins(
 
     if binning_method == "quantile":
         bins = _fit_quantile_bins(clean_series.dropna(), n_bins)
+    elif binning_method == "chi_merge":
+        if y is None:
+            raise ValueError("Target y is required when binning_method='chi_merge'.")
+        clean_y = np.asarray(y)[(~special_mask).to_numpy()]
+        bins, chi_merge_metadata = _fit_chi_merge_binning(clean_series, clean_y, n_bins)
+        binning_data.update(chi_merge_metadata)
     elif binning_method == "tree":
         if y is None:
             raise ValueError("Target y is required when binning_method='tree'.")
@@ -238,7 +437,8 @@ def merge_non_significant_bins(
     min_pct: float,
     *,
     protect_special_bins: bool = True,
-) -> np.ndarray:
+    return_mapping: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[int, int]]:
     """Merge bins that do not meet the minimum population threshold.
 
     Parameters
@@ -253,31 +453,49 @@ def merge_non_significant_bins(
     np.ndarray
         Array of bin IDs with small bins merged into their nearest neighbor.
     """
-    unique_bins = np.unique(bin_ids)
+    original_bin_ids = bin_ids.copy()
+    unique_bins = np.unique(original_bin_ids)
     if len(unique_bins) <= 1:
-        return bin_ids
+        if return_mapping:
+            return original_bin_ids, {int(bin_id): int(bin_id) for bin_id in unique_bins}
+        return original_bin_ids
 
-    total_count = len(bin_ids)
-    new_bin_ids = bin_ids.copy()
+    total_count = len(original_bin_ids)
+    new_bin_ids = original_bin_ids.copy()
 
-    for bin_id in unique_bins:
-        if protect_special_bins and bin_id < 0:
-            continue
+    while True:
+        active_bins = np.unique(new_bin_ids)
+        candidate_bins = active_bins[active_bins >= 0] if protect_special_bins else active_bins
+        if len(candidate_bins) <= 1:
+            break
 
-        mask = (new_bin_ids == bin_id)
-        if (mask.sum() / total_count) < min_pct:
-            # Find closest bin ID to merge into
-            # Use float to allow np.inf assignment
-            candidate_bins = unique_bins[unique_bins >= 0] if protect_special_bins else unique_bins
-            candidate_bins = candidate_bins[candidate_bins != bin_id]
-            if len(candidate_bins) == 0:
-                continue
+        counts = {int(bin_id): int((new_bin_ids == bin_id).sum()) for bin_id in candidate_bins}
+        small_bins = [
+            int(bin_id)
+            for bin_id in candidate_bins
+            if counts[int(bin_id)] / total_count < min_pct
+        ]
+        if not small_bins:
+            break
 
-            dist = np.abs(candidate_bins.astype(float) - float(bin_id))
-            nearest_neighbor = candidate_bins[np.argmin(dist)]
-            new_bin_ids[mask] = nearest_neighbor
+        bin_id = min(small_bins, key=lambda value: (counts[value], value))
+        neighbor_candidates = candidate_bins[candidate_bins != bin_id]
+        if len(neighbor_candidates) == 0:
+            break
 
-    return new_bin_ids
+        dist = np.abs(neighbor_candidates.astype(float) - float(bin_id))
+        nearest_neighbor = int(neighbor_candidates[np.argmin(dist)])
+        new_bin_ids[new_bin_ids == bin_id] = nearest_neighbor
+
+    if not return_mapping:
+        return new_bin_ids
+
+    bin_id_map: dict[int, int] = {}
+    for original_bin in unique_bins:
+        final_bin = int(new_bin_ids[np.flatnonzero(original_bin_ids == original_bin)[0]])
+        bin_id_map[int(original_bin)] = final_bin
+
+    return new_bin_ids, bin_id_map
 
 def get_bin_labels(config: dict[str, Any], series: pd.Series = None, bin_ids: np.ndarray = None) -> dict[int, str]:    
     """Converts bin configurations into human-readable range strings."""
@@ -286,8 +504,21 @@ def get_bin_labels(config: dict[str, Any], series: pd.Series = None, bin_ids: np
         for i, val in enumerate(config["special_codes"]):
             labels[-(i + 2)] = f"Special: {val}"
         bins = config["bins"]
-        for i in range(len(bins) - 1):
-            labels[i] = f"[{bins[i]}, {bins[i+1]})"
+        bin_id_map = config.get("bin_id_map")
+        if bin_id_map:
+            merged_numeric_bins: dict[int, list[int]] = {}
+            for original_bin, final_bin in bin_id_map.items():
+                if original_bin < 0 or final_bin < 0:
+                    continue
+                merged_numeric_bins.setdefault(int(final_bin), []).append(int(original_bin))
+
+            for final_bin, original_bins in merged_numeric_bins.items():
+                left_idx = min(original_bins)
+                right_idx = max(original_bins) + 1
+                labels[final_bin] = f"[{bins[left_idx]}, {bins[right_idx]})"
+        else:
+            for i in range(len(bins) - 1):
+                labels[i] = f"[{bins[i]}, {bins[i+1]})"
         labels[-1] = "Missing/Other"
     else:
         s_str = series.fillna("missing").astype(str)

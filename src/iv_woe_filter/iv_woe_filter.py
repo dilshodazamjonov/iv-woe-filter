@@ -35,7 +35,7 @@ Interpretation of IV:
 Implementation Features:
 ------------------------
 - Automatic Feature Typing: Separate handling for numeric and categorical data.
-- Configurable Numeric Binning: Quantile or supervised tree-based thresholds.
+- Configurable Numeric Binning: Quantile, ChiMerge, or supervised tree-based thresholds.
 - Monotonicity Checking: Reports whether the risk profile of a feature is 
   consistently increasing or decreasing across bins.
 - Regulatory Audit Logs: Generates CSV artifacts including bin-level statistics, 
@@ -67,6 +67,7 @@ from .binning import (
     fit_numeric_bins,
     get_bin_labels,
     merge_non_significant_bins,
+    remap_bin_ids,
 )
 from .woe import (
     calculate_woe_iv,
@@ -75,6 +76,7 @@ from .woe import (
     compute_aggregate_stats,
 )
 from .metrics import calculate_feature_gini, calculate_gini, calculate_psi_from_counts
+from .plots import prepare_plot_frame, render_feature_plot, save_rendered_feature_plot
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +94,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
     ----------
     n_bins : int, default=10
         Maximum number of bins for numeric variables.
-    binning_method : {"quantile", "tree"}, default="quantile"
+    binning_method : {"quantile", "chi_merge", "tree"}, default="quantile"
         Strategy used to learn numeric bin boundaries.
     min_iv : float, default=0.02
         Minimum Information Value required to retain a feature.
@@ -342,7 +344,13 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         bin_ids = apply_bins(series, bin_config)
 
         if min_bin_pct:
-            bin_ids = merge_non_significant_bins(bin_ids, min_bin_pct)
+            bin_ids, bin_id_map = merge_non_significant_bins(
+                bin_ids,
+                min_bin_pct,
+                return_mapping=True,
+            )
+            if any(original_bin != final_bin for original_bin, final_bin in bin_id_map.items()):
+                bin_config["bin_id_map"] = bin_id_map
 
         stats = compute_aggregate_stats(bin_ids, y)
         
@@ -384,8 +392,14 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
 
         if self.verbose:
             logger.info("Fitting %d features...", len(columns))
+            if self.binning_method == "chi_merge":
+                logger.info(
+                    "Using thread-based parallelism for ChiMerge to reduce worker memory overhead."
+                )
 
-        results = Parallel(n_jobs=self.n_jobs)(
+        parallel_prefer = "threads" if self.binning_method == "chi_merge" else None
+
+        results = Parallel(n_jobs=self.n_jobs, prefer=parallel_prefer)(
             delayed(self._process_column)(
                 col,
                 X[col],
@@ -426,6 +440,23 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
             self.monotonicity_report_[col] = res["monotonic"]
             self.feature_types_[col] = res["feature_type"]
             self.leakage_flags_[col] = iv_val > self.max_iv_for_leakage
+            if self.verbose and self.binning_[col].get("binning_method") == "chi_merge":
+                seed_bins = self.binning_[col].get("chi_merge_seed_bin_count", 0)
+                final_bins = self.binning_[col].get("chi_merge_final_bin_count", 0)
+                used_prebinning = self.binning_[col].get("chi_merge_used_prebinning", False)
+                unique_values = self.binning_[col].get("chi_merge_unique_value_count", 0)
+                log_message = (
+                    "ChiMerge complete for feature '%s': %d final bins from %d seed bins "
+                    "(unique values=%d%s)."
+                )
+                logger.info(
+                    log_message,
+                    col,
+                    final_bins,
+                    seed_bins,
+                    unique_values,
+                    ", quantile pre-binning applied" if used_prebinning else "",
+                )
 
         self.iv_table_ = pd.DataFrame(
             {
@@ -461,6 +492,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
 
         for col in cols_to_process:
             bin_ids = apply_bins(X_out[col], self.binning_[col])
+            bin_ids = remap_bin_ids(bin_ids, self.binning_[col])
             w_map = self.woe_maps_[col]
             X_out[col] = pd.Series(bin_ids, index=X_out.index).map(w_map).fillna(0.0)
 
@@ -498,6 +530,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         
         for col in available_columns:
             bin_ids = apply_bins(X[col], self.binning_[col])
+            bin_ids = remap_bin_ids(bin_ids, self.binning_[col])
             actual_counts = pd.Series(bin_ids).value_counts()
             expected_counts = self.reference_distributions_[col]
             
@@ -557,6 +590,78 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         pd.DataFrame(audit_rows).to_csv(
             os.path.join(self.output_dir, "feature_audit.csv"), index=False
         )
+
+    def plot_feature_audit(
+        self,
+        feature: str,
+        *,
+        round_digits: int = 2,
+        figsize: tuple[float, float] = (12, 6),
+    ):
+        """Plot bad rate and WOE for a fitted feature."""
+        check_is_fitted(self, ["_per_feature_stats", "iv_table_"])
+        if feature not in self._per_feature_stats:
+            raise KeyError(f"Unknown feature {feature!r}.")
+
+        plot_df = prepare_plot_frame(self._per_feature_stats[feature].copy(), round_digits)
+        iv_value = float(self.iv_table_.loc[feature, "IV"])
+        gini_value = float(self.iv_table_.loc[feature, "Gini"])
+        return render_feature_plot(
+            plot_df,
+            feature,
+            iv_value,
+            gini_value,
+            figsize=figsize,
+        )
+
+    @staticmethod
+    def _sanitize_plot_filename(feature: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in feature).strip("_")
+        return safe or "feature"
+
+    def save_feature_plot(
+        self,
+        output_dir: str | None = None,
+        *,
+        feature: str = "all",
+        round_digits: int = 2,
+        figsize: tuple[float, float] = (12, 6),
+    ) -> str | list[str]:
+        """Save one fitted feature plot or all feature plots when `feature='all'`."""
+        check_is_fitted(self, ["_per_feature_stats", "iv_table_"])
+
+        if output_dir is None:
+            if not self.output_dir:
+                raise ValueError("output_dir must be provided when the transformer has no output_dir.")
+            output_dir = os.path.join(self.output_dir, "plots")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        features_to_plot = list(self.iv_table_.index) if feature == "all" else [feature]
+        saved_paths: list[str] = []
+        for feature_name in features_to_plot:
+            if feature_name not in self._per_feature_stats:
+                raise KeyError(f"Unknown feature {feature_name!r}.")
+
+            plot_df = prepare_plot_frame(self._per_feature_stats[feature_name].copy(), round_digits)
+            iv_value = float(self.iv_table_.loc[feature_name, "IV"])
+            gini_value = float(self.iv_table_.loc[feature_name, "Gini"])
+            output_path = os.path.join(
+                output_dir,
+                f"{self._sanitize_plot_filename(feature_name)}.png",
+            )
+            saved_paths.append(
+                save_rendered_feature_plot(
+                    plot_df,
+                    feature_name,
+                    iv_value,
+                    gini_value,
+                    output_path,
+                    figsize=figsize,
+                )
+            )
+
+        return saved_paths if feature == "all" else saved_paths[0]
 
     def get_feature_names_out(self, input_features: list[str] | None = None) -> list[str]:
         """Return list of selected feature names for Scikit-Learn pipeline compatibility."""
