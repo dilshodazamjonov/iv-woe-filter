@@ -33,12 +33,28 @@ def _round_bin_label(label: str, round_digits: int) -> str:
     return _NUMERIC_PATTERN.sub(replace, label)
 
 
+def _plot_bin_sort_key(bin_id: int) -> tuple[int, int]:
+    """Place regular bins first, then special bins, with missing/other last."""
+    if bin_id >= 0:
+        return (0, bin_id)
+    if bin_id == -1:
+        return (2, 0)
+    return (1, abs(bin_id))
+
+
 def prepare_plot_frame(
     stats: pd.DataFrame,
     round_digits: int,
 ) -> pd.DataFrame:
     """Return bin statistics ready for plotting."""
     plot_df = stats.reset_index().rename(columns={"index": "bin_id"})
+    if "bin_id" not in plot_df.columns:
+        plot_df = plot_df.rename(columns={plot_df.columns[0]: "bin_id"})
+    plot_df = plot_df.sort_values(
+        by="bin_id",
+        key=lambda series: series.map(_plot_bin_sort_key),
+        kind="stable",
+    ).reset_index(drop=True)
     plot_df["bad_rate"] = plot_df["bad"] / plot_df["count"]
     plot_df["bin_label"] = plot_df["bin_range"].map(lambda value: _round_bin_label(str(value), round_digits))
     return plot_df

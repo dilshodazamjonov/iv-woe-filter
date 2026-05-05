@@ -12,7 +12,7 @@ Scikit-learn compatible IV/WOE binning, feature selection, and PSI auditing for 
 
 ## Motivation
 
-In credit risk modeling, WOE encoding and IV-based feature selection are standard practice. In most teams, they are also a source of recurring problems: hand-rolled binning scripts that differ between analysts, WOE maps that are never persisted, transformations applied inconsistently between training and scoring, and no formal record of how features were selected or why.
+In credit risk modeling, WOE(Weight of Evidence) encoding and IV(Information Value)-based feature selection are standard practice. In most teams, they are also a source of recurring problems: hand-rolled binning scripts that differ between analysts, WOE maps that are never persisted, transformations applied inconsistently between training and scoring, and no formal record of how features were selected or why.
 
 The consequences are familiar - model validation findings, scorecard drift, leakage that surfaces only in production, cycles that require reconstructing preprocessing decisions from memory or scattered notebooks.
 
@@ -66,50 +66,104 @@ pip install iv-woe-filter   # iv-woe-filter is not on conda-forge; install via p
 ### Usage Example
 
 ```python
+import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+
 from iv_woe_filter import IVWOEFilter
 
 # 1. Generate synthetic data
-X_arr, y = make_classification(
-    n_samples=5000,
-    n_features=10,
-    n_informative=6,
-    random_state=42
-)
+X_arr, y = make_classification(n_samples=5000, n_features=10, n_informative=6, random_state=42)
 X = pd.DataFrame(X_arr, columns=[
     "bureau_score", "months_employed", "loan_to_value", "num_delinquencies",
     "credit_utilisation", "income_band", "months_since_last_default",
     "debt_to_income", "num_inquiries", "age_at_app",
 ])
 
-# 2. Fit the filter (train phase)
-filter_ = IVWOEFilter(
-    binning_method="tree",
-    n_bins=6,
-    min_iv=0.02,
-    min_gini=0.05,
-    tree_max_depth=3,
-    tree_min_samples_leaf=0.05,
-    random_state=42,
-    drop_unselected=True,
-    output_dir="audit/",
+# 2. Declare special/sentinel values that should be isolated during binning
+special_codes = {
+    "bureau_score": [-999],
+    "months_employed": [9999],
+    "num_delinquencies": [-1],
+}
+
+# 3. Simulate special values and true missing values before the split
+X.loc[X.index[:75], "bureau_score"] = -999
+X.loc[X.index[75:125], "months_employed"] = 9999
+X.loc[X.index[125:175], "num_delinquencies"] = -1
+
+X.loc[X.index[175:250], "loan_to_value"] = np.nan
+X.loc[X.index[250:325], "credit_utilisation"] = np.nan
+X.loc[X.index[325:375], "income_band"] = np.nan
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# 4. Add a few more null/special cases to the holdout sample
+X_test = X_test.copy()
+X_test.loc[X_test.index[:15], "bureau_score"] = -999
+X_test.loc[X_test.index[15:30], "months_employed"] = 9999
+X_test.loc[X_test.index[30:45], "loan_to_value"] = np.nan
+
+print("Training data simulation summary:")
+print(X_train.isna().sum()[lambda s: s.gt(0)])
+print(
+    {
+        feature: int(X_train[feature].isin(values).sum())
+        for feature, values in special_codes.items()
+    }
 )
-X_woe = filter_.fit_transform(X, y)
 
-print(filter_.iv_table_)          # IV and Gini scores for all features
-print(filter_.selected_features_)  # Features that passed both IV and Gini thresholds
+binning_runs = (
+    ("quantile", {}),
+    ("chi_merge", {}),
+    ("tree", {"tree_max_depth": 3, "tree_min_samples_leaf": 0.05}),
+)
 
-# 3. Simulate a population shift (out-of-time phase)
-X_test = X.copy()
-X_test["age_at_app"] += 2.0
+for binning_method, extra_kwargs in binning_runs:
+    print(f"\n=== {binning_method.upper()} BINNING ===")
 
-# 4. Audit feature stability (PSI)
-psi_report = filter_.calculate_psi(X_test, save=True)
-print(psi_report)                 # PSI score and shift status
+    pipe = Pipeline([
+        (
+            "woe",
+            IVWOEFilter(
+                binning_method=binning_method,
+                n_bins=6,
+                min_iv=0.02,
+                min_gini=0.05,
+                special_codes=special_codes,
+                drop_unselected=False,
+                output_dir=f"audit/{binning_method}/",
+                random_state=42,
+                verbose=False,
+                **extra_kwargs,
+            ),
+        ),
+        ("model", LogisticRegression(max_iter=1000)),
+    ])
 
-# 5. Save per-feature audit plots
-filter_.save_feature_plot(output_dir="audit/plots/", feature="all")
+    pipe.fit(X_train, y_train)
+
+    woe_step = pipe.named_steps["woe"]
+    iv_results = woe_step.iv_table_
+    psi_results = woe_step.calculate_psi(X_test)
+
+    print(iv_results)
+    print("Selected features:", woe_step.selected_features_)
+    print(psi_results)
+
+    plot_paths = woe_step.save_feature_plot(
+        output_dir=f"audit/{binning_method}/plots",
+        feature="bureau_score",
+        round_digits=2,
+    )
+    print("Saved plots:", plot_paths)
+
+    predictions = pipe.predict_proba(X_test)
+    print("AUC:", roc_auc_score(y_test.flatten(), predictions[:, 1]))
 ```
 
 For the default unsupervised path, omit `binning_method` and the tree-specific parameters. `IVWOEFilter()` uses quantile binning for numeric features unless you explicitly switch to a supervised alternative such as `binning_method="chi_merge"` or `binning_method="tree"`.

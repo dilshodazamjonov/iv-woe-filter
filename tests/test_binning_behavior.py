@@ -6,6 +6,7 @@ import pandas as pd
 from iv_woe_filter import IVWOEFilter
 from iv_woe_filter.binning import apply_bins, remap_bin_ids
 from iv_woe_filter.metrics import calculate_feature_gini
+from iv_woe_filter.plots import prepare_plot_frame
 
 
 def test_categorical_small_bins_are_merged_into_combined_labels():
@@ -146,3 +147,26 @@ def test_numeric_gini_uses_fitted_woe_representation():
     expected_gini = calculate_feature_gini(bin_ids, transformer.woe_maps_["score"], y)
 
     assert np.isclose(transformer.iv_table_.loc["score", "Gini"], expected_gini)
+
+
+def test_prepare_plot_frame_places_regular_bins_before_special_and_missing():
+    stats = pd.DataFrame(
+        {
+            "bin_range": ["Special: -99", "Missing/Other", "[0.0, 1.0)", "[1.0, 2.0)"],
+            "count": [5, 3, 20, 15],
+            "bad": [2, 1, 4, 6],
+            "good": [3, 2, 16, 9],
+            "woe": [0.1, -0.2, 0.3, 0.4],
+        },
+        index=pd.Index([-2, -1, 0, 1], name="bin"),
+    )
+
+    plot_df = prepare_plot_frame(stats, round_digits=2)
+
+    assert plot_df["bin_id"].tolist() == [0, 1, -2, -1]
+    assert plot_df["bin_label"].tolist() == [
+        "[0.00, 1.00)",
+        "[1.00, 2.00)",
+        "Special: -99",
+        "Missing/Other",
+    ]
