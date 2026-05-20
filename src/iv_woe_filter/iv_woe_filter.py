@@ -387,7 +387,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
         if missing_columns:
             raise KeyError(f"Missing columns for {context}: {missing_columns}")
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> IVWOEFilter:
+    def fit(self, X: pd.DataFrame | np.ndarray, y: pd.Series | np.ndarray) -> IVWOEFilter:
         """Fit binning, WOE, IV, Gini, and audit outputs for all input columns."""
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -477,7 +477,7 @@ class IVWOEFilter(BaseEstimator, TransformerMixin):
 
         return self
 
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, X: pd.DataFrame | np.ndarray) -> pd.DataFrame:
         """Apply fitted binning and WOE transformation."""
         check_is_fitted(self, ["selected_features_", "binning_", "woe_maps_"])
 
